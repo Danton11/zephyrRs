@@ -1,3 +1,9 @@
+use volatile::Volatile;
+use core::fmt;
+use spin::Mutex;
+use lazy_static::lazy_static;
+
+
 #[allow(dead_code)] //incase we dont use a colour
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // By deriving the Copy, Clone, Debug, PartialEq, and Eq traits, we enable copy semantics for the type and make it printable and comparable.
 #[repr(u8)] // each enum variant is stored as a u8
@@ -62,7 +68,7 @@ const BUFFER_WIDTH: usize = 80;
 // Buffer: This structure represents the VGA buffer. It's a 2D array (BUFFER_HEIGHT by BUFFER_WIDTH) of ScreenChar. The #[repr(transparent)] attribute indicates that this struct should have the same memory layout as its only field. This is useful for safety when performing operations that depend on the layout like FFI or interfacing with hardware, as in this case where you're directly interfacing with VGA memory.
 #[repr(transparent)]
 struct Buffer {
-    chars: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
 
@@ -92,10 +98,10 @@ impl Writer {
 
                 let color_code = self.color_code;
                 // Write the character to the buffer at the current position with the current color
-                self.buffer.chars[row][col] = ScreenChar {
+                self.buffer.chars[row][col].write(ScreenChar {
                     ascii_character: byte,
                     color_code,
-                };
+                });
                 // Move the column position one step to the right
                 self.column_position += 1;
             }
@@ -103,7 +109,26 @@ impl Writer {
     }
 
     // A method that starts a new line in the VGA text buffer
-    fn new_line(&mut self) {/}
+    fn new_line(&mut self) {
+        for row in 1..BUFFER_HEIGHT{
+            for col in 0..BUFFER_WIDTH{
+                let character = self.buffer.chars[row][col].read();
+                self.buffer.chars[row-1][col].write(character);
+            }
+        }
+        self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        let blank = ScreenChar{
+            ascii_character: b' ',
+            color_code: self.color_code,
+        };
+        for col in 0..BUFFER_WIDTH{
+            self.buffer.chars[row][col].write(blank);
+        }
+    }
 }
 
 impl Writer {
@@ -120,14 +145,37 @@ impl Writer {
     }
 }
 
-pub fn print_something() {
-    let mut writer = Writer {
+impl fmt::Write for Writer{
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_string(s);
+        Ok(())
+    }
+}
+
+lazy_static! {
+    pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer{
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) }, // 0xb8000 is the address of the VGA buffer in memory
-    };
+        buffer: unsafe {&mut *(0xb8000 as *mut Buffer)}, 
 
-    writer.write_byte(b'H');
-    writer.write_string("ello ");
-    writer.write_string("Wörld!");
+        // NOTE: We have only one unsafe block. Afterwards, all operations are safe. 
+    });
+}
+
+
+#[macro_export]
+macro_rules! print{
+    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::print!("{}\n",format_args!($($arg)*)));
+}
+
+#[doc(hidden)]
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    WRITER.lock().write_fmt(args).unwrap();
 }

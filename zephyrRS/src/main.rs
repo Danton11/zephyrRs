@@ -2,33 +2,24 @@
 #![allow(non_snake_case)]
 #![no_main]
 use core::panic::PanicInfo;
+//use core::fmt::Write;
 
 mod vga_buffer;
 
-static HELLO: &[u8] = b"Hello World!";
+/// This function is called on panic.
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    println!("{}",_info);
+    loop {}
+} 
+
 
 #[no_mangle] // don't mangle the name of this function when compiled  (needs to called start)
 pub extern "C" fn _start() -> ! { // ! sets a diverging return value 
     // this function is the entry point, since the linker looks for a function
     // named `_start` by default
 
-    let vga_buffer = 0xb8000 as *mut u8;
-
-    for (i,&byte) in HELLO.iter().enumerate() {
-        unsafe {
-            *vga_buffer.offset(i as isize * 2) = byte;
-            *vga_buffer.offset(i as isize * 2+1) = 0xb;    
-        }
-    }
-
+    println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
+    //panic!("This is a panic message!" ); 
     loop {}
 }
-
-
-/// This function is called on panic.
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    vga_buffer::print_something();
-
-    loop {}
-} 
