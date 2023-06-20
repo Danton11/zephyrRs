@@ -21,5 +21,7 @@ pub extern "C" fn _start() -> ! { // ! sets a diverging return value
 
     println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
     //panic!("This is a panic message!" ); 
+
+    println!("This is another message{}","!"); 
     loop {}
 }
