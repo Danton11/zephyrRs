@@ -18,10 +18,16 @@ pub extern "C" fn _start() -> ! { // ! sets a diverging return value
 
     println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
 
+    zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
+    
+    //call breakpoint exception
+    x86_64::instructions::interrupts::int3();
+
     // if the cfg attribute 'test' is set, call the function test_main
     #[cfg(test)]
     test_main();
-
+    
+    println!("It did not crash! :(");
     loop {}
 }
 
