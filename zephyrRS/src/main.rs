@@ -7,7 +7,6 @@
 
 use core::panic::PanicInfo;
 //use core::fmt::Write;
-
 mod vga_buffer; // imports the custom vga module
 mod serial;
 
@@ -21,16 +20,26 @@ pub extern "C" fn _start() -> ! { // ! sets a diverging return value
     zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
     
     //call breakpoint exception
-    x86_64::instructions::interrupts::int3();
+    //x86_64::instructions::interrupts::int3();
+    
+    //trigger page fault to test double-fault handling
+    //unsafe {
+    //    *(0xdeadbeef as *mut u8) = 42;
+    //};
+    
+    //cause stack overflow
+    //fn stack_overflow(){
+    //    stack_overflow();
+    //}
+    //stack_overflow();
 
     // if the cfg attribute 'test' is set, call the function test_main
     #[cfg(test)]
     test_main();
     
-    println!("It did not crash! :(");
+    println!("It did not crash!");
     loop {}
 }
-
 
 /// This function is called on panic.
 #[cfg(not(test))]

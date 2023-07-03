@@ -5,12 +5,12 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 #![allow(non_snake_case)] 
 #![feature(abi_x86_interrupt)]
-
 use core::panic::PanicInfo;
 
 pub mod serial;
 pub mod vga_buffer;
 pub mod interrupts;
+pub mod gdt;
 
 pub trait Testable {
     fn run(&self) -> ();
@@ -61,6 +61,7 @@ pub fn exit_qemu(exit_code: QemuExitCode){
 
 //init interrupt handler
 pub fn init(){
+    gdt::init();
     interrupts::init_idt();
 }
 
