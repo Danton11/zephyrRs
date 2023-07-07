@@ -7,10 +7,18 @@
 #![feature(abi_x86_interrupt)]
 use core::panic::PanicInfo;
 
+#[cfg(test)]
+use bootloader::{entry_point, BootInfo};
+
+
 pub mod serial;
 pub mod vga_buffer;
 pub mod interrupts;
 pub mod gdt;
+pub mod memory;
+
+#[cfg(test)]
+entry_point!(test_kernel_main);
 
 pub trait Testable {
     fn run(&self) -> ();
@@ -42,7 +50,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> !{
     exit_qemu(QemuExitCode::Failed);
     loop{}
 }
-
+    
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -59,39 +67,30 @@ pub fn exit_qemu(exit_code: QemuExitCode){
     }
 }
 
+pub fn hlt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt(); // wrapper for asm hlt
+    }
+}
 //init interrupt handler
 pub fn init(){
     gdt::init();
     interrupts::init_idt();
+    unsafe {interrupts::PICS.lock().initialize()}; // initialise PIC ( hardware interrupts)
+    x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
 }
 
 #[cfg(test)]
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
     init();
     test_main();
-    loop{}
+    hlt_loop();
 }
 
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     test_panic_handler(info)
-}
-
-// simple vga test
-#[test_case]
-fn test_println_simple() {
-    println!("test_println_simple output"); 
-}
-
-
-// simple vga test
-#[test_case]
-fn test_println_many() {
-    for _ in 0..200{
-        println!("test_println_many output"); 
-    }
 }
 
 

@@ -6,37 +6,42 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 
 use core::panic::PanicInfo;
+use x86_64::structures::paging::PageTable;
+use bootloader::{BootInfo, entry_point};
 //use core::fmt::Write;
 mod vga_buffer; // imports the custom vga module
 mod serial;
 
+
+entry_point!(kernel_main);
+
 // entry point
-#[no_mangle] // don't mangle the name of this function when compiled  (needs to called start)
-pub extern "C" fn _start() -> ! { // ! sets a diverging return value 
+fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return value 
     // this function is the entry point, since the linker looks for a function
-
+    use zephyrRS::memory;
+    use x86_64::{structures::paging::Translate, structures::paging::Page, VirtAddr};
+    use x86_64::registers::control::Cr3;
+    
     println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
-
+    // if the cfg attribute 'test' is set, call the function test_main
     zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
     
-    //call breakpoint exception
-    //x86_64::instructions::interrupts::int3();
-    
-    //trigger page fault to test double-fault handling
-    //unsafe {
-    //    *(0xdeadbeef as *mut u8) = 42;
-    //};
-    
-    //cause stack overflow
-    //fn stack_overflow(){
-    //    stack_overflow();
-    //}
-    //stack_overflow();
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe {memory::BootInfoFrameAllocator::init(&boot_info.memory_map)};
 
-    // if the cfg attribute 'test' is set, call the function test_main
+    // map an unused page
+    let page = Page::containing_address(VirtAddr::new(0xdeadbeadf000));
+    memory::create_example_mapping(page, &mut mapper, &mut frame_allocator);
+
+    // write the string `New!` to the screen through the new mapping
+    let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
+    unsafe { page_ptr.offset(400).write_volatile(0x_f021_f077_f065_f04e) };
+
     #[cfg(test)]
     test_main();
-    
+
+
     println!("It did not crash!");
     loop {}
 }
