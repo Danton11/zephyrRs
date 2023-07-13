@@ -1,25 +1,22 @@
-use alloc::alloc::{GlobalAlloc, Layout};
-use core::ptr::null_mut;
 use x86_64::{structures::paging::{mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,},VirtAddr,};
-use linked_list_allocator::LockedHeap;
-
-pub struct Dummy;
+use alloc::alloc::{GlobalAlloc, Layout};
+use bump::BumpAllocator;
 
 pub const HEAP_START: usize = 0x4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024;
 
 
-
+pub mod bump;
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Locked<BumpAllocator> = Locked::new(BumpAllocator::new());
 
-pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) -> Result<(), MapToError<Size4KiB>>{
+pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>,) -> Result<(), MapToError<Size4KiB>>{
     let pages = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
         let heap_end = heap_start + HEAP_SIZE - 1u64; //  We want an inclusive bound (the address of the last byte of the heap), so we subtract 1
         let heap_start_page = Page::containing_address(heap_start); // convert into Page types
         let heap_end_page = Page::containing_address(heap_end);
-        Page::range(heap_start_page, heap_end_page) // create range
+        Page::range_inclusive(heap_start_page, heap_end_page) // create range
     };
     
 
@@ -36,23 +33,21 @@ pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl 
     Ok(())
 }
 
-
-
-pub fn memory_size() -> usize {
-    ALLOCATOR.lock().size()
+pub struct Locked<A>{
+    inner: spin::Mutex<A>,
 }
 
-pub fn memory_used() -> usize {
-    ALLOCATOR.lock().used()
+impl<A> Locked<A> {
+    pub const fn new(inner: A) -> Self {
+        Locked {inner: spin::Mutex::new(inner),}
+    }
+
+    pub fn lock(&self) -> spin::MutexGuard<A> {
+        self.inner.lock()
+    }
 }
 
-pub fn memory_free() -> usize {
-    ALLOCATOR.lock().free()
-}
 
-
-pub fn phys_addr(ptr: *const u8) -> u64 {
-    let virt_addr = VirtAddr::new(ptr as u64);
-    let phys_addr = sys::mem::virt_to_phys(virt_addr).unwrap();
-    phys_addr.as_u64()
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
 }

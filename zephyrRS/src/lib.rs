@@ -9,10 +9,6 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-#[cfg(test)]
-use bootloader::{entry_point, BootInfo};
-
-
 pub mod serial;
 pub mod vga_buffer;
 pub mod interrupts;
@@ -21,8 +17,14 @@ pub mod memory;
 pub mod allocator;
 
 
-#[cfg(test)]
-entry_point!(test_kernel_main);
+//init interrupt handler
+pub fn init(){
+    gdt::init();
+    interrupts::init_idt();
+    unsafe {interrupts::PICS.lock().initialize()}; // initialise PIC ( hardware interrupts)
+    x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
+}
+
 
 pub trait Testable {
     fn run(&self) -> ();
@@ -40,9 +42,8 @@ where T: Fn(),{
 
 //custom test_runner
 pub fn test_runner(tests: &[&dyn Testable]) {
-    serial_println!("Running {} tests", tests.len()); // number of tests to be run
-    
-    for test in tests { // run each test
+    serial_println!("Running {} tests", tests.len());
+    for test in tests {
         test.run();
     }
     exit_qemu(QemuExitCode::Success);
@@ -52,7 +53,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> !{
     serial_println!("[failed]\n");
     serial_println!("Error: {}\n",info);
     exit_qemu(QemuExitCode::Failed);
-    loop{}
+    hlt_loop();
 }
     
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,13 +77,13 @@ pub fn hlt_loop() -> ! {
         x86_64::instructions::hlt(); // wrapper for asm hlt
     }
 }
-//init interrupt handler
-pub fn init(){
-    gdt::init();
-    interrupts::init_idt();
-    unsafe {interrupts::PICS.lock().initialize()}; // initialise PIC ( hardware interrupts)
-    x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
-}
+
+#[cfg(test)]
+use bootloader::{entry_point, BootInfo};
+
+#[cfg(test)]
+entry_point!(test_kernel_main);
+
 
 #[cfg(test)]
 fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {

@@ -6,9 +6,9 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 
 use core::panic::PanicInfo;
-use x86_64::structures::paging::PageTable;
+
 use bootloader::{BootInfo, entry_point};
-use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
+
 use zephyrRS::allocator;
 
 //use core::fmt::Write;
@@ -24,8 +24,8 @@ entry_point!(kernel_main); // tells the bootloader where entry point is, instead
 fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return value 
     // this function is the entry point
     use zephyrRS::memory;
-    use x86_64::{structures::paging::Translate, structures::paging::Page, VirtAddr};
-    use x86_64::registers::control::Cr3;
+    use x86_64::{VirtAddr};
+    
     print!("\x1b[?25h");
     println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
     // if the cfg attribute 'test' is set, call the function test_main
@@ -64,7 +64,7 @@ fn panic(info: &PanicInfo) -> ! {
 // practice test_case
 #[test_case]
 fn trivial_assertion() {
-    assert_eq!(1, 1); // assertion 
+    assert_eq!(1, 2); // assertion 
 }
 
 
