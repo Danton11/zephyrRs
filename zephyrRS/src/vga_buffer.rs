@@ -2,6 +2,29 @@ use volatile::Volatile;
 use core::fmt;
 use spin::Mutex;
 use lazy_static::lazy_static;
+use crate::println;
+///Color Enum: The Color enum represents the 16 different colors available in VGA text mode.
+
+///ColorCode Struct: The ColorCode struct is used to store color codes for text foreground and background. It's stored as a single u8, with the high 4 bits representing the background color and the low 4 bits representing the foreground color. It also includes an implementation block with a method for creating a new ColorCode.
+
+///ScreenChar Struct: The ScreenChar struct represents a colored character that can be printed to the screen. It includes an ASCII character (ascii_character) and a color code (color_code).
+
+///Buffer Struct: The Buffer struct represents the VGA text buffer, which is a two-dimensional array of ScreenChar.
+
+///Writer Struct: The Writer struct handles the actual process of writing characters to the screen. It keeps track of the current column position (column_position), the color code used for printing (color_code), and a reference to the buffer where characters are written (buffer).
+
+///Writer Impl: The implementation block for Writer includes methods for writing bytes and strings to the buffer, clearing a row, and moving to a new line.
+
+///Lazy Static: The WRITER is a lazy static, meaning it is a global, lazily initialized object. This allows access to the VGA buffer from different parts of the kernel. It's also protected by a spinlock mutex to ensure only one thread can write to the VGA buffer at a time.
+
+///Print Macros: These are print! and println! macros for writing formatted strings to the VGA buffer. The _print function is the backend for these macros. It writes a formatted string to the VGA buffer without allowing interrupts to ensure the operation is atomic.
+
+///Tests: Finally, there are some test cases that check the functionality of the println macro. One test writes a simple message to the screen, another writes many messages, and the last verifies that the correct output is displayed on the screen.
+///
+///
+
+
+
 
 
 #[allow(dead_code)] //incase we dont use a colour
@@ -85,6 +108,17 @@ impl Writer {
         match byte {
             // If the byte is a newline character
             b'\n' => self.new_line(),  // call the `new_line` method
+            0x08 => { // backspace
+                println!("[bspace]");
+            if self.column_position > 0 {
+                    self.column_position -= 1;                   
+                    let x = self.column_position;
+                    let y = BUFFER_HEIGHT - 1;
+                    self.buffer.chars[x][y].write(ScreenChar { ascii_character: b' ', color_code:self.color_code });
+            } else if BUFFER_HEIGHT > 1 {
+                    self.clear_row(self.column_position);
+                }
+            }
             byte => {
                 // If the current column position is beyond the buffer width
                 if self.column_position >= BUFFER_WIDTH {

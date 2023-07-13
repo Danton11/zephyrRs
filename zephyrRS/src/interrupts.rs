@@ -1,3 +1,4 @@
+use pc_keyboard::KeyCode;
 use x86_64::structures::idt::{InterruptDescriptorTable,InterruptStackFrame, PageFaultErrorCode};
 use crate::{println, print, gdt};
 use lazy_static::lazy_static;
@@ -78,7 +79,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    print!(".");
+    //print!(".");
 
     unsafe {PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());}
 }
@@ -102,7 +103,14 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
                 DecodedKey::Unicode(character) => print!("{}", character),
-                DecodedKey::RawKey(key) => print!("{:?}", key),
+                DecodedKey::RawKey(key) => {
+                    match key {
+                        KeyCode::Backspace => {
+                            print!("[bspace]");
+                        }
+                        _ => print!("{:?}",key),
+                    }
+                }
             }
         }
     }

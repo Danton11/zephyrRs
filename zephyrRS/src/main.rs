@@ -8,20 +8,25 @@
 use core::panic::PanicInfo;
 use x86_64::structures::paging::PageTable;
 use bootloader::{BootInfo, entry_point};
+use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
+use zephyrRS::allocator;
+
 //use core::fmt::Write;
 mod vga_buffer; // imports the custom vga module
 mod serial;
 
+extern crate alloc; 
 
-entry_point!(kernel_main);
+
+entry_point!(kernel_main); // tells the bootloader where entry point is, instead of _start()
 
 // entry point
 fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return value 
-    // this function is the entry point, since the linker looks for a function
+    // this function is the entry point
     use zephyrRS::memory;
     use x86_64::{structures::paging::Translate, structures::paging::Page, VirtAddr};
     use x86_64::registers::control::Cr3;
-    
+    print!("\x1b[?25h");
     println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
     // if the cfg attribute 'test' is set, call the function test_main
     zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
@@ -30,20 +35,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {memory::BootInfoFrameAllocator::init(&boot_info.memory_map)};
 
-    // map an unused page
-    let page = Page::containing_address(VirtAddr::new(0xdeadbeadf000));
-    memory::create_example_mapping(page, &mut mapper, &mut frame_allocator);
-
-    // write the string `New!` to the screen through the new mapping
-    let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
-    unsafe { page_ptr.offset(400).write_volatile(0x_f021_f077_f065_f04e) };
+    allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed");
 
     #[cfg(test)]
     test_main();
 
 
     println!("It did not crash!");
-    loop {}
+    zephyrRS::hlt_loop();
 }
 
 /// This function is called on panic.
