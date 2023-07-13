@@ -4,6 +4,8 @@ use lazy_static::lazy_static;
 use x86_64::structures::gdt::{GlobalDescriptorTable,Descriptor};
 use x86_64::structures::gdt::SegmentSelector;
 
+use crate::println;
+
 
 //Define the index into the IST for double dault handling 
 //normally the IST starts from 1
@@ -74,4 +76,6 @@ pub fn init() {
         // tells the cpu where to find the code segment
         load_tss(GDT.1.tss_selector);
     }
+
+    println!("Initialised GDT...");
 }

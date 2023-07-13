@@ -26,8 +26,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
     use zephyrRS::memory;
     use x86_64::{VirtAddr};
     
-    print!("\x1b[?25h");
-    println!("Hello World{}","!"); // this println! uses the macro defined in vga_buffer.rs
+    println!("Setting up kernel{}","!:"); // this println! uses the macro defined in vga_buffer.rs
     // if the cfg attribute 'test' is set, call the function test_main
     zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
     
@@ -35,13 +34,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {memory::BootInfoFrameAllocator::init(&boot_info.memory_map)};
 
-    allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed");
+    allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
 
     #[cfg(test)]
     test_main();
 
 
-    println!("It did not crash!");
+    println!("Successfully initialised Kernel");
+
     zephyrRS::hlt_loop();
 }
 

@@ -29,6 +29,7 @@ impl InterruptIndex{
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
+        // each index set to handler for ISR
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
 
@@ -49,6 +50,7 @@ lazy_static! {
 
 pub fn init_idt(){
     IDT.load(); // loads the idt for the cpu to use 
+    println!("Initialised IDT...");
 }
 
 pub static PICS: spin::Mutex<ChainedPics> = spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET,PIC_2_OFFSET)});

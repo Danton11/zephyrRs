@@ -5,6 +5,7 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 #![allow(non_snake_case)] 
 #![feature(abi_x86_interrupt)]
+#![feature(const_mut_refs)]
 extern crate alloc;
 
 use core::panic::PanicInfo;

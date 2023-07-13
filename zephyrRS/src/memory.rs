@@ -6,6 +6,8 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
+use crate::println;
+
 
 //Remember that page tables are used by the MMU (Memory Management Unit) to translate virtual addresses to physical addresses. When a program accesses an address, it provides a virtual address, which the MMU then translates to a physical address. The physical address is then used to access the actual data in memory. The mapping from virtual to physical addresses is done through a set of hierarchical page tables.
 
@@ -24,6 +26,7 @@ use x86_64::{
 /// to avoid aliasing `&mut` references (which is undefined behavior).
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
     let level_4_table = active_level_4_table(physical_memory_offset);
+    println!("Initialised page tables...");
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 

@@ -1,14 +1,20 @@
+use crate::println;
 use x86_64::{structures::paging::{mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,},VirtAddr,};
 use alloc::alloc::{GlobalAlloc, Layout};
-use bump::BumpAllocator;
+//use bump::BumpAllocator;
+use linked_list::LinkedListAllocator;
+use fixed_size_block::FixedSizeBlockAllocator;
 
 pub const HEAP_START: usize = 0x4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024;
 
 
 pub mod bump;
+pub mod linked_list;
+pub mod fixed_size_block;
+
 #[global_allocator]
-static ALLOCATOR: Locked<BumpAllocator> = Locked::new(BumpAllocator::new());
+static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
 
 pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>,) -> Result<(), MapToError<Size4KiB>>{
     let pages = {
@@ -29,7 +35,8 @@ pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl 
     }
 
     unsafe{ALLOCATOR.lock().init(HEAP_START,HEAP_SIZE)}
-
+    
+    println!("Initialised Heap...");
     Ok(())
 }
 
