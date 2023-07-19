@@ -6,10 +6,11 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 
 use core::panic::PanicInfo;
-
 use bootloader::{BootInfo, entry_point};
-
-use zephyrRS::allocator;
+use zephyrRS::{allocator};
+use zephyrRS::task::{Task, simple_executor::SimpleExecutor};
+use zephyrRS::memory;
+use x86_64::VirtAddr;
 
 //use core::fmt::Write;
 mod vga_buffer; // imports the custom vga module
@@ -23,8 +24,6 @@ entry_point!(kernel_main); // tells the bootloader where entry point is, instead
 // entry point
 fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return value 
     // this function is the entry point
-    use zephyrRS::memory;
-    use x86_64::{VirtAddr};
     
     println!("Setting up kernel{}","!:"); // this println! uses the macro defined in vga_buffer.rs
     // if the cfg attribute 'test' is set, call the function test_main
@@ -36,13 +35,27 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
 
     allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
 
+    let mut executor = SimpleExecutor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.run();
+
     #[cfg(test)]
     test_main();
 
 
     println!("Successfully initialised Kernel");
-
+    serial_println!("Successfully initialised Kernel");
     zephyrRS::hlt_loop();
+}
+
+async fn return_number() -> u32 {
+    42
+}
+
+async fn example_task() {
+    let number = return_number().await;
+    println!("asyncro number: {}", number);
+    serial_println!("asyncro number: {}",number);
 }
 
 /// This function is called on panic.
@@ -64,7 +77,7 @@ fn panic(info: &PanicInfo) -> ! {
 // practice test_case
 #[test_case]
 fn trivial_assertion() {
-    assert_eq!(1, 2); // assertion 
+    assert_eq!(1, 1); // assertion 
 }
 
 
