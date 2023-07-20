@@ -97,27 +97,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 
     let mut port = Port::new(0x60); // data port for PS/2 controller
-    let mut keyboard = KEYBOARD.lock();
-
     let scancode: u8 = unsafe {port.read()};
+
+    crate::task::keyboard::add_scancode(scancode);
     
-    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        if let Some(key) = keyboard.process_keyevent(key_event) {
-            match key {
-                DecodedKey::Unicode(character) => print!("{}", character),
-                DecodedKey::RawKey(key) => {
-                    match key {
-                        KeyCode::Backspace => {
-                            print!("[bspace]");
-                        }
-                        _ => print!("{:?}",key),
-                    }
-                }
-            }
-        }
-    }
-
-
 
     // send EOI (end of interrupt) to CPU to resume previous task
     unsafe {
@@ -135,4 +118,3 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
     hlt_loop();
 
 }
-    use x86_64::VirtAddr;

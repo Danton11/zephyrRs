@@ -7,6 +7,8 @@
 
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
+use zephyrRS::task::executor::Executor;
+use zephyrRS::task::keyboard;
 use zephyrRS::{allocator};
 use zephyrRS::task::{Task, simple_executor::SimpleExecutor};
 use zephyrRS::memory;
@@ -35,9 +37,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
 
     allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
 
-    let mut executor = SimpleExecutor::new();
-    executor.spawn(Task::new(example_task()));
-    executor.run();
+    let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
+    executor.spawn(Task::new(example_task())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.spawn(Task::new(keyboard::output_keypress()));
+
+    executor.run(); // pop the task, create rawwaker for task, call the poll method, check if
+    // Poll::ready, if not add to back of the queue, else return 
 
     #[cfg(test)]
     test_main();
