@@ -97,6 +97,7 @@ struct Buffer {
 
 pub struct Writer {
     column_position: usize,  // the current position in the column, i.e., where the next character will be written.
+    row_position: usize, 
     color_code: ColorCode,   //  the color code used to draw text.
     buffer: &'static mut Buffer, // a mutable reference to the VGA buffer where text will be written.
 }
@@ -177,6 +178,19 @@ impl Writer {
 
         }
     }
+
+    pub fn set_position(&mut self, column: usize, row:usize){
+        if row < BUFFER_HEIGHT && column < BUFFER_WIDTH {
+            self.row_position = row;
+            self.column_position = column;
+        }else {
+            panic!("Position out of bounds");
+        }
+    }
+
+    pub fn get_position(&self) -> (usize,usize) {
+        (self.column_position, self.row_position)
+    }
 }
 
 impl fmt::Write for Writer{
@@ -189,6 +203,7 @@ impl fmt::Write for Writer{
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer{
         column_position: 0,
+        row_position: BUFFER_HEIGHT - 1,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe {&mut *(0xb8000 as *mut Buffer)}, 
 

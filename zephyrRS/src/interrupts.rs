@@ -81,7 +81,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    print!(".");
+ //   print!(".");
 
     unsafe {PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());}
 }
@@ -92,8 +92,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     use spin::Mutex;
 
     lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key,ScancodeSet1>> = 
-            Mutex::new(Keyboard::new(layouts::Us104Key, ScancodeSet1,HandleControl::Ignore));
+        static ref KEYBOARD: Mutex<Keyboard<layouts::Uk105Key,ScancodeSet1>> = 
+            Mutex::new(Keyboard::new(layouts::Uk105Key, ScancodeSet1,HandleControl::Ignore));
     }
 
     let mut port = Port::new(0x60); // data port for PS/2 controller

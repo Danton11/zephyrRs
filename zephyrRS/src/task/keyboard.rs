@@ -68,18 +68,43 @@ impl Stream for ScancodeStream {
 // translate scancodes into key presses
 pub async fn output_keypress() {
     let mut scancodes = ScancodeStream::new();
-    let mut keyboard = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
+    let mut keyboard = Keyboard::new(layouts::Uk105Key, ScancodeSet1, HandleControl::Ignore);
 
     // for each scancode in the queue
     while let Some(scancode) = scancodes.next().await {
+        //print!("Scancode: {}",scancode);
         if let Ok(Some(key_press)) = keyboard.add_byte(scancode) {
+            //print!("key event: {:?}",key_press);
             if let Some(key) = keyboard.process_keyevent(key_press) {
+                //println!("Decoded key: {:?}", key);
                 match key {
-                    DecodedKey::Unicode(char) => print!("{}", char),
+                    DecodedKey::Unicode(char) => {
+                        match char {
+                            '\u{8}' => {
+                                //print!("bspace");
+                                // get current position of cursor
+                                let pos = crate::vga_buffer::WRITER.lock().get_position();
+                                
+                                // check if the cursor is not at the start of the line 
+                                if pos.0  > 0 {
+                                    // move the cursor back by one column 
+                                    crate::vga_buffer::WRITER.lock().set_position(pos.0 - 1, pos.1);
+
+                                    // overwrite the char 
+                                    print!(" ");
+                                    
+                                    // move cursor back 
+
+                                    crate::vga_buffer::WRITER.lock().set_position(pos.0 - 1, pos.1);
+                                }
+                            },
+                            _ => print!("{}", char),
+                        }    
+                    },
                     DecodedKey::RawKey(key) => print!("{:?}",key),
+                    }
                 }
             }
         }
-        
     }
-}
+
