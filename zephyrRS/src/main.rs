@@ -37,20 +37,23 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
 
     allocator::init_heap(&mut mapper,&mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
 
-    let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
-    executor.spawn(Task::new(example_task())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    executor.spawn(Task::new(keyboard::output_keypress()));
-
-    executor.run(); // pop the task, create rawwaker for task, call the poll method, check if
-    // Poll::ready, if not add to back of the queue, else return 
 
     #[cfg(test)]
     test_main();
 
 
     println!("Successfully initialised Kernel");
-    serial_println!("Successfully initialised Kernel");
-    zephyrRS::hlt_loop();
+
+
+    let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
+
+    executor.1.spawn(Task::new(keyboard::output_keypress()));
+    //executor.1.spawn(Task::new(task_a())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    //executor.1.spawn(Task::new(task_b())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+
+    executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if
+    // Poll::ready, if not add to back of the queue, else return 
+
 }
 
 async fn return_number() -> u32 {
@@ -85,4 +88,38 @@ fn trivial_assertion() {
     assert_eq!(1, 1); // assertion 
 }
 
+async fn task_a() {
+    let mut a: u32 = 0;
+    let mut b: u8 = 0;
+    loop {
+        if a == 100_000_000 {
+            println!("Process A running. {}% complete.", b);
+            a = 0;
+            b += 1;
 
+            if b == 100 {
+                println!("Process A complete.");
+                break;
+            }
+        }
+        a += 1;
+    }
+}
+
+async fn task_b() {
+    let mut a: u32 = 0;
+    let mut b: u8 = 0;
+    loop {
+        if a == 100_000_000 {
+            println!("Process B running. {}% complete.", b);
+            a = 0;
+            b += 1;
+
+            if b == 100 {
+                println!("Process B complete.");
+                break;
+            }
+        }
+        a += 1;
+    }
+}

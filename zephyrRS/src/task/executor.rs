@@ -1,34 +1,56 @@
 use super::{Task, TaskID};
 use alloc::{collections::BTreeMap, sync::Arc};
+use spin::Mutex;
 use core::task::{Waker,Context, Poll};
 use crossbeam_queue::ArrayQueue;
 use alloc::task::Wake;
 
+
 pub struct Executor {
-    tasks: BTreeMap<TaskID, Task>, // tree map of taskids and tasks
-    task_queue: Arc<ArrayQueue<TaskID>>, // queue of taskids
-    waker_cache: BTreeMap<TaskID, Waker>, // 
+    tasks: Arc<Mutex<BTreeMap<TaskID, Arc<Mutex<Task>>>>>,
+    task_queue: Arc<ArrayQueue<TaskID>>,
+    waker_cache: BTreeMap<TaskID, Waker>,
 }
+
+pub struct Spawner {
+    tasks: Arc<Mutex<BTreeMap<TaskID, Arc<Mutex<Task>>>>>,
+    task_queue: Arc<ArrayQueue<TaskID>>,
+}
+
 
 // The idea is that the wakers push the ID of the woken task to the queue. The executor sits on the receiving end of the queue, retrieves the woken tasks by their ID from the tasks map, and then runs them. 
 
 impl Executor {
-    pub fn new() -> Self {
-        Executor { 
-            tasks: BTreeMap::new() ,
-            task_queue: Arc::new(ArrayQueue::new(200)), // queue of task ids 
-            waker_cache: BTreeMap::new(),
-        }
+
+    pub fn new() -> (Self, Spawner) {
+        let tasks = Arc::new(Mutex::new(BTreeMap::new()));
+        let task_queue = Arc::new(ArrayQueue::new(200));
+        
+        (
+            Executor {
+                tasks: Arc::clone(&tasks),
+                task_queue: Arc::clone(&task_queue),
+                waker_cache: BTreeMap::new(),
+            },
+            Spawner {
+                tasks: tasks,
+                task_queue: task_queue,
+            }
+        )
     }
 
-    pub fn spawn(&mut self, task:Task){
+
+    pub fn spawn(&mut self, task:Task) {
         let taskid = task.id;
-        if self.tasks.insert(task.id,task).is_some() { // btreemap will return a value if you try insert it twice
+        let task = Arc::new(Mutex::new(task));
+        if self.tasks.lock().insert(taskid, Arc::clone(&task)).is_some() {
             panic!("duplicate task id in queue");
         }
         self.task_queue.push(taskid).expect("queue full");
     }
-    // The basic idea of this function is similar to our SimpleExecutor: Loop over all tasks in the task_queue, create a waker for each task, and then poll them. However, instead of adding pending tasks back to the end of the task_queue, we let our TaskWaker implementation take care of adding woken tasks back to the queue. The implementation of this waker type will be shown in a moment.
+
+
+
     fn run_tasks(&mut self) {
         let Self {
             tasks,
@@ -37,22 +59,27 @@ impl Executor {
         } = self;
 
         while let Ok(task_id) = task_queue.pop() {
-            let task = match tasks.get_mut(&task_id) {
-                Some(task) => task,
-                None => continue, // task finished
+            let mut tasks_locked = tasks.lock();
+            let task_status = if let Some(task) = tasks_locked.get_mut(&task_id) {
+                let waker = waker_cache.entry(task_id).or_insert_with(|| TaskWaker::new(task_id, task_queue.clone()));
+                let mut context = Context::from_waker(waker);
+                let task_status = task.lock().poll(&mut context);
+                task_status
+            } else {
+                continue; // task not found, so continue to the next iteration
             };
 
-            let waker = waker_cache.entry(task_id).or_insert_with(|| TaskWaker::new(task_id, task_queue.clone()));
-            let mut context = Context::from_waker(waker);
-            match task.poll(&mut context) {
+            match task_status {
                 Poll::Ready(()) => {
-                    tasks.remove(&task_id);
+                    tasks_locked.remove(&task_id);
                     waker_cache.remove(&task_id);
                 }
                 Poll::Pending => {}
             }
         }
     }
+
+
 
     // We use destructuring to split self into its three fields to avoid some borrow checker errors. Namely, our implementation needs to access the self.task_queue from within a closure, which currently tries to borrow self completely. This is a fundamental borrow checker issue that will be resolved when RFC 2229 is implemented.
 
@@ -80,6 +107,22 @@ impl Executor {
         
     }
 
+}
+
+
+impl Spawner {
+    pub fn spawn(&self, task: Task) {
+        let taskid = task.id;
+        let task = Arc::new(Mutex::new(task));
+
+        // Insert the task into the task map. If a task with the same ID already exists, panic.
+        if self.tasks.lock().insert(taskid, Arc::clone(&task)).is_some() {
+            panic!("duplicate task id in queue");
+        }
+
+        // Add the task's ID to the task queue
+        self.task_queue.push(taskid).expect("queue full");
+    }
 }
 
 struct TaskWaker {

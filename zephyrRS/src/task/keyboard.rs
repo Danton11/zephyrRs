@@ -5,7 +5,7 @@ use crate::print;
 use core::{pin::Pin, task::{Poll,Context}};
 use futures_util::{task::AtomicWaker, stream::{Stream, StreamExt}};
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-
+use alloc::vec::Vec;
 // Represents a stream of scancodes
 pub struct ScancodeStream {
     _private: (),
@@ -97,14 +97,64 @@ pub async fn output_keypress() {
 
                                     crate::vga_buffer::WRITER.lock().set_position(pos.0 - 1, pos.1);
                                 }
+                            },                           
+                            
+                            '\u{7f}' => { // ASCII for Delete key
+                                // Get the current position of the cursor
+                                let pos = crate::vga_buffer::WRITER.lock().get_position();
+
+                                // Find the last non-space character on the line
+                                let end = (pos.0..80).rposition(|col| {
+                                    crate::vga_buffer::WRITER.lock().read_char(col, pos.1) != ' '
+                                }).unwrap_or(pos.0);
+
+                                // Read all characters to the right of the cursor up to the last non-space character
+                                let chars_to_right: Vec<char> = (pos.0..end).map(|col| {
+                                    crate::vga_buffer::WRITER.lock().read_char(col, pos.1)
+                                }).collect();
+
+                                // Write the characters back, shifted one position to the left
+                                for (i, &c) in chars_to_right.iter().enumerate() {
+                                    crate::vga_buffer::WRITER.lock().write_char_at(pos.0 + i, pos.1, c);
+                                }
+
+                                // Clear the last character on the line
+                                crate::vga_buffer::WRITER.lock().write_char_at(end, pos.1, ' ');
                             },
-                            _ => print!("{}", char),
-                        }    
+                            _ => print!("{:?}", char),
+                        }   
                     },
-                    DecodedKey::RawKey(key) => print!("{:?}",key),
+                    DecodedKey::RawKey(key) => {
+                        match key {
+                            pc_keyboard::KeyCode::ArrowUp => {
+                                let (x, y) = crate::vga_buffer::WRITER.lock().get_position();
+                                if y > 0 {
+                                    crate::vga_buffer::WRITER.lock().set_position(x, y - 1);
+                                }
+                            }
+                            pc_keyboard::KeyCode::ArrowDown=> {
+                                let (x, y) = crate::vga_buffer::WRITER.lock().get_position();
+                                if y < 79 {
+                                    crate::vga_buffer::WRITER.lock().set_position(x, y + 1);
+                                }
+                            }
+                            pc_keyboard::KeyCode::ArrowLeft => {
+                                let (x, y) = crate::vga_buffer::WRITER.lock().get_position();
+                                if x > 0 {
+                                    crate::vga_buffer::WRITER.lock().set_position(x - 1, y);
+                                }
+                            }
+                            pc_keyboard::KeyCode::ArrowRight => {
+                                let (x, y) = crate::vga_buffer::WRITER.lock().get_position();
+                                if x < 79 {
+                                    crate::vga_buffer::WRITER.lock().set_position(x + 1, y);
+                                }
+                            }
+                            _ => print!("{:?}", key),
+                        }
                     }
                 }
             }
         }
     }
-
+}

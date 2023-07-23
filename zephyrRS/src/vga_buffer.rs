@@ -98,6 +98,7 @@ struct Buffer {
 pub struct Writer {
     column_position: usize,  // the current position in the column, i.e., where the next character will be written.
     row_position: usize, 
+    cursor_position: (usize, usize),
     color_code: ColorCode,   //  the color code used to draw text.
     buffer: &'static mut Buffer, // a mutable reference to the VGA buffer where text will be written.
 }
@@ -119,7 +120,23 @@ impl Writer {
             } else if BUFFER_HEIGHT > 1 {
                     self.clear_row(self.column_position);
                 }
-            }
+            },
+            0x7f => { // ASCII for Delete key
+                let (x, y) = self.get_position();
+                // Shift all characters to the right of the cursor to the left
+                for i in x..BUFFER_WIDTH-1 {
+                    let ScreenChar { ascii_character: c, .. } = self.buffer.chars[y][i+1].read();
+                    self.buffer.chars[y][i].write(ScreenChar {
+                        ascii_character: c,
+                        color_code: self.color_code,
+                    });
+                }
+                // Clear the last character on the line
+                self.buffer.chars[y][BUFFER_WIDTH-1].write(ScreenChar {
+                    ascii_character: b' ',
+                    color_code: self.color_code,
+                });
+            },
             byte => {
                 // If the current column position is beyond the buffer width
                 if self.column_position >= BUFFER_WIDTH {
@@ -183,6 +200,7 @@ impl Writer {
         if row < BUFFER_HEIGHT && column < BUFFER_WIDTH {
             self.row_position = row;
             self.column_position = column;
+            self.cursor_position = (column,row);
         }else {
             panic!("Position out of bounds");
         }
@@ -191,6 +209,22 @@ impl Writer {
     pub fn get_position(&self) -> (usize,usize) {
         (self.column_position, self.row_position)
     }
+    
+    pub fn read_char(&self, x: usize, y: usize) -> char {
+        // TODO: Check bounds
+        self.buffer.chars[y][x].read().ascii_character as char
+    }
+    pub fn write_char_at(&mut self, x: usize, y: usize, c: char) {
+        if x < BUFFER_WIDTH && y < BUFFER_HEIGHT {
+            self.buffer.chars[y][x].write(ScreenChar {
+                ascii_character: c as u8,
+                color_code: self.color_code,
+            });
+        } else {
+            panic!("Write position ({}, {}) out of bounds", x, y);
+        }
+    }
+
 }
 
 impl fmt::Write for Writer{
@@ -204,6 +238,7 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer{
         column_position: 0,
         row_position: BUFFER_HEIGHT - 1,
+        cursor_position: (0,  BUFFER_HEIGHT - 1), 
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe {&mut *(0xb8000 as *mut Buffer)}, 
 
