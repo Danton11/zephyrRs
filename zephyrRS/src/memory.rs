@@ -5,6 +5,8 @@ use x86_64::{
     },
     PhysAddr, VirtAddr,
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::println;
 
@@ -62,7 +64,7 @@ pub fn create_example_mapping(
 
     let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
     let flags = Flags::PRESENT | Flags::WRITABLE;
-
+ 
     let map_to_result = unsafe {
         // FIXME: this is not safe, we do it only for testing
         mapper.map_to(page, frame, flags, frame_allocator)
@@ -85,6 +87,7 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
+    frame_usage: [bool; 1000],
 }
 
 
@@ -99,14 +102,29 @@ impl BootInfoFrameAllocator {
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+        let frame_count = memory_map.iter().count();
+        println!("num of entries: {}",frame_count);
+
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
+            frame_usage: [false;1000],
         }
     }
 
 
-    ///- `usable_frames`: This method returns an iterator over all frames marked as `USABLE` in the memory map. It does this by iterating over all regions in the memory map, filtering out regions not marked as `USABLE`, and then converting each region's address range to a list of frame addresses.
+
+    fn mark_frame_as_used(&mut self, frame: PhysFrame) {
+        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+        self.frame_usage[frame_num] = true; // mark frame as used
+    }
+
+    fn is_frame_free(&self, frame: PhysFrame) -> bool {
+        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+        !self.frame_usage[frame_num] // return true if frame is free
+    }
+
+        ///- `usable_frames`: This method returns an iterator over all frames marked as `USABLE` in the memory map. It does this by iterating over all regions in the memory map, filtering out regions not marked as `USABLE`, and then converting each region's address range to a list of frame addresses.
     /// Returns an iterator over the usable frames specified in the memory map.
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         // get usable regions from memory map
@@ -126,7 +144,13 @@ impl BootInfoFrameAllocator {
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        match frame {
+            Some(frame) if self.is_frame_free(frame) => {
+                self.mark_frame_as_used(frame);
+                self.next += 1;
+                Some(frame)
+            }
+            _ => None,
+        }
     }
 }

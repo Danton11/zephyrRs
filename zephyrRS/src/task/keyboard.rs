@@ -121,7 +121,7 @@ pub async fn output_keypress() {
                                 // Clear the last character on the line
                                 crate::vga_buffer::WRITER.lock().write_char_at(end, pos.1, ' ');
                             },
-                            _ => print!("{:?}", char),
+                            _ => print!("{}", char),
                         }   
                     },
                     DecodedKey::RawKey(key) => {
