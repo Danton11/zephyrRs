@@ -7,16 +7,14 @@
 
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
-use zephyrRS::task::executor::Executor;
-use zephyrRS::task::keyboard;
-use zephyrRS::{allocator};
-use zephyrRS::task::{Task, simple_executor::SimpleExecutor};
-use zephyrRS::memory;
+use zephyrRS::proc::task::executor::Executor;
+use zephyrRS::dev::keyboard;
+use zephyrRS::mem::allocator;
+use zephyrRS::proc::task::Task;
+use zephyrRS::mem::memory;
+use zephyrRS::{println,serial_println};
 use x86_64::VirtAddr;
 
-//use core::fmt::Write;
-mod vga_buffer; // imports the custom vga module
-mod serial;
 
 extern crate alloc; 
 
@@ -43,16 +41,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! { // ! sets a diverging return
 
 
     println!("Successfully initialised Kernel");
+    serial_println!("Successfully initialised Kernel");
 
 
     let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
 
     executor.1.spawn(Task::new(keyboard::output_keypress()));
-    //executor.1.spawn(Task::new(task_a())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    //executor.1.spawn(Task::new(task_b())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(example_task()));
+    executor.1.spawn(Task::new(task_a())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(task_b())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
 
-    executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if
-    // Poll::ready, if not add to back of the queue, else return 
+    executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return 
 
 }
 
@@ -94,15 +93,17 @@ async fn task_a() {
     loop {
         if a == 100_000_000 {
             println!("Process A running. {}% complete.", b);
+            serial_println!("Process A running. {}% complete.", b);
             a = 0;
-            b += 1;
+            b += 2;
 
             if b == 100 {
                 println!("Process A complete.");
+                serial_println!("Process A complete.");
                 break;
             }
         }
-        a += 1;
+        a += 5;
     }
 }
 
@@ -112,14 +113,16 @@ async fn task_b() {
     loop {
         if a == 100_000_000 {
             println!("Process B running. {}% complete.", b);
+            serial_println!("Process B running. {}% complete.", b);
             a = 0;
-            b += 1;
+            b += 2;
 
             if b == 100 {
                 println!("Process B complete.");
+                serial_println!("Process B complete.");
                 break;
             }
         }
-        a += 1;
+        a += 5;
     }
 }

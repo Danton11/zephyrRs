@@ -239,7 +239,7 @@ lazy_static! {
         column_position: 0,
         row_position: BUFFER_HEIGHT - 1,
         cursor_position: (0,  BUFFER_HEIGHT - 1), 
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        color_code: ColorCode::new(Color::Green, Color::Black),
         buffer: unsafe {&mut *(0xb8000 as *mut Buffer)}, 
 
         // NOTE: We have only one unsafe block. Afterwards, all operations are safe. 
@@ -249,7 +249,7 @@ lazy_static! {
 
 #[macro_export]
 macro_rules! print{
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::dev::vga_buffer::_print(format_args!($($arg)*)));
 }
 
 #[macro_export]

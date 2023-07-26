@@ -9,13 +9,13 @@ extern crate alloc;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use alloc::{boxed::Box, vec::Vec}; 
-use zephyrRS::{allocator::HEAP_SIZE, hlt_loop};
+use zephyrRS::{mem::allocator::HEAP_SIZE, hlt_loop};
 
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    use zephyrRS::allocator;
-    use zephyrRS::memory::{self,BootInfoFrameAllocator};
+    use zephyrRS::mem::allocator;
+    use zephyrRS::mem::memory::{self,BootInfoFrameAllocator};
     use x86_64::VirtAddr;
 
     zephyrRS::init();

@@ -5,9 +5,6 @@ use x86_64::{
     },
     PhysAddr, VirtAddr,
 };
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::println;
 
 

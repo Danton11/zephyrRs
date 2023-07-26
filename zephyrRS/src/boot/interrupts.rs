@@ -1,6 +1,5 @@
-use pc_keyboard::KeyCode;
 use x86_64::structures::idt::{InterruptDescriptorTable,InterruptStackFrame, PageFaultErrorCode};
-use crate::{println, print, gdt};
+use crate::{println, boot::gdt};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
@@ -88,7 +87,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
-    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+    use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
     use spin::Mutex;
 
     lazy_static! {
@@ -99,7 +98,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let mut port = Port::new(0x60); // data port for PS/2 controller
     let scancode: u8 = unsafe {port.read()};
 
-    crate::task::keyboard::add_scancode(scancode);
+    crate::dev::keyboard::add_scancode(scancode);
     
 
     // send EOI (end of interrupt) to CPU to resume previous task

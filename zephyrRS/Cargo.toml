@@ -38,9 +38,10 @@ default-features = false
 
 
 [package.metadata.bootimage] #  bootimage runner adds these arguments to the QEMU command for tests
-test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04","-serial","stdio"] # iobase parameter specifies the port address the device should live (f4 should be unused)
+test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04","-serial","stdio","-display","none"] # iobase parameter specifies the port address the device should live (f4 should be unused)
 test-success-exit-code = 33  # (0x10 << 1) | 1 maps our exit code to 0 so that cargo test correctly recognisses the success case
 test-timeout = 300 # seconds
+run-args = ["-serial","stdio"]
 
 [[test]]
 name = "should_panic"

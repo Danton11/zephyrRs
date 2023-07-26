@@ -20,7 +20,7 @@ lazy_static! {
         unsafe {
             idt.double_fault
                 .set_handler_fn(test_double_fault_handler)
-                .set_stack_index(zephyrRS::gdt::DOUBLE_FAULT_IST_INDEX);
+                .set_stack_index(zephyrRS::boot::gdt::DOUBLE_FAULT_IST_INDEX);
         }
         idt
     };
@@ -36,7 +36,7 @@ pub fn init_test_idt(){
 pub extern "C" fn _start() -> ! {
     serial_print!("stack overflow::stack_overflow...\t");
 
-    zephyrRS::gdt::init();
+    zephyrRS::boot::gdt::init();
     init_test_idt();
 
     stack_overflow();
