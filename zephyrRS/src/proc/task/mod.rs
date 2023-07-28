@@ -1,3 +1,4 @@
+use crate::boot::interrupts::timer_interrupt_occurred;
 use crate::{println, serial_println};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +36,29 @@ impl Task {
     }
 }
 
+
+pub async fn yield_now() {
+    struct YieldNow {
+        polled_once: bool,
+    }
+
+    impl Future for YieldNow {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.polled_once {
+                Poll::Ready(())
+            } else {
+                self.polled_once = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    YieldNow { polled_once: false }.await
+}
+
 pub async fn return_number() -> u32 {
     42
 }
@@ -43,6 +67,8 @@ pub async fn example_task() {
     let number = return_number().await;
     println!("asyncro number: {}", number);
 }
+
+
 
 pub async fn task_a() {
     let mut a: u32 = 0;
@@ -56,6 +82,11 @@ pub async fn task_a() {
             if b == 100 {
                 println!("Process A complete.");
                 break;
+            }
+            
+            if timer_interrupt_occurred() {
+                yield_now().await;
+                continue;
             }
         }
         a += 5;
@@ -75,7 +106,13 @@ pub async fn task_b() {
                 println!("Process B complete.");
                 break;
             }
+
+            if timer_interrupt_occurred() {
+                yield_now().await;
+                continue;
+            }
         }
         a += 5;
     }
 }
+
