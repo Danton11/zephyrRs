@@ -1,6 +1,6 @@
 # zephyrRs
-#Rust microkernel master's project
-##ZephyrRS Kernel Documentation
+# Rust microkernel master's project
+## ZephyrRS Kernel Documentation
 
 ### main.rs
 The entry point of the kernel. It calls the init function defined in lib.rs, which initializes various components of the system. It also sets up a simple memory mapping for testing purposes.
