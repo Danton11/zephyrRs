@@ -8,23 +8,23 @@ use core::panic::PanicInfo;
 use zephyrRS::println;
 
 #[no_mangle]
-pub extern "C" fn _start() -> ! { // entry point
+pub extern "C" fn _start() -> ! {
+    // entry point
     test_main();
 
-    loop{}
+    loop {}
 }
-
 
 fn test_runner(_tests: &[&dyn Fn()]) {
     unimplemented!();
 }
 
 #[panic_handler]
-fn panic(info:&PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
     zephyrRS::test_panic_handler(info)
 }
 
 #[test_case]
-fn test_println(){
+fn test_println() {
     println!("test_println output");
 }

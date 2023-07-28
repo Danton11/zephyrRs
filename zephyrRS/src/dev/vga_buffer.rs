@@ -1,8 +1,8 @@
-use volatile::Volatile;
-use core::fmt;
-use spin::Mutex;
-use lazy_static::lazy_static;
 use crate::println;
+use core::fmt;
+use lazy_static::lazy_static;
+use spin::Mutex;
+use volatile::Volatile;
 ///Color Enum: The Color enum represents the 16 different colors available in VGA text mode.
 
 ///ColorCode Struct: The ColorCode struct is used to store color codes for text foreground and background. It's stored as a single u8, with the high 4 bits representing the background color and the low 4 bits representing the foreground color. It also includes an implementation block with a method for creating a new ColorCode.
@@ -23,12 +23,9 @@ use crate::println;
 ///
 ///
 
-
-
-
-
 #[allow(dead_code)] //incase we dont use a colour
-#[derive(Debug, Clone, Copy, PartialEq, Eq)] // By deriving the Copy, Clone, Debug, PartialEq, and Eq traits, we enable copy semantics for the type and make it printable and comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// By deriving the Copy, Clone, Debug, PartialEq, and Eq traits, we enable copy semantics for the type and make it printable and comparable.
 #[repr(u8)] // each enum variant is stored as a u8
 pub enum Color {
     Black = 0,
@@ -50,9 +47,6 @@ pub enum Color {
 }
 
 // enum for representing colors for the text buffer
-
-
-
 
 // Here's what each line does:
 
@@ -83,7 +77,6 @@ struct ScreenChar {
     color_code: ColorCode,
 } // This structure represents a character that can be drawn on the screen. It includes the ASCII value of the character (ascii_character) and the color code that should be used to display it (color_code). The #[repr(C)] attribute ensures that the structure layout is in the C-style, where the fields are laid out in the order specified.
 
-
 // These constants represent the dimensions of the text buffer, which are likely the dimensions of the text mode VGA screen (80 columns wide by 25 rows high).
 const BUFFER_HEIGHT: usize = 25;
 const BUFFER_WIDTH: usize = 80;
@@ -94,12 +87,11 @@ struct Buffer {
     chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
-
 pub struct Writer {
-    column_position: usize,  // the current position in the column, i.e., where the next character will be written.
-    row_position: usize, 
+    column_position: usize, // the current position in the column, i.e., where the next character will be written.
+    row_position: usize,
     cursor_position: (usize, usize),
-    color_code: ColorCode,   //  the color code used to draw text.
+    color_code: ColorCode,       //  the color code used to draw text.
     buffer: &'static mut Buffer, // a mutable reference to the VGA buffer where text will be written.
 }
 
@@ -109,40 +101,47 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             // If the byte is a newline character
-            b'\n' => self.new_line(),  // call the `new_line` method
-            0x08 => { // backspace
+            b'\n' => self.new_line(), // call the `new_line` method
+            0x08 => {
+                // backspace
                 println!("[bspace]");
-            if self.column_position > 0 {
-                    self.column_position -= 1;                   
+                if self.column_position > 0 {
+                    self.column_position -= 1;
                     let x = self.column_position;
                     let y = BUFFER_HEIGHT - 1;
-                    self.buffer.chars[x][y].write(ScreenChar { ascii_character: b' ', color_code:self.color_code });
-            } else if BUFFER_HEIGHT > 1 {
+                    self.buffer.chars[x][y].write(ScreenChar {
+                        ascii_character: b' ',
+                        color_code: self.color_code,
+                    });
+                } else if BUFFER_HEIGHT > 1 {
                     self.clear_row(self.column_position);
                 }
-            },
-            0x7f => { // ASCII for Delete key
+            }
+            0x7f => {
+                // ASCII for Delete key
                 let (x, y) = self.get_position();
                 // Shift all characters to the right of the cursor to the left
-                for i in x..BUFFER_WIDTH-1 {
-                    let ScreenChar { ascii_character: c, .. } = self.buffer.chars[y][i+1].read();
+                for i in x..BUFFER_WIDTH - 1 {
+                    let ScreenChar {
+                        ascii_character: c, ..
+                    } = self.buffer.chars[y][i + 1].read();
                     self.buffer.chars[y][i].write(ScreenChar {
                         ascii_character: c,
                         color_code: self.color_code,
                     });
                 }
                 // Clear the last character on the line
-                self.buffer.chars[y][BUFFER_WIDTH-1].write(ScreenChar {
+                self.buffer.chars[y][BUFFER_WIDTH - 1].write(ScreenChar {
                     ascii_character: b' ',
                     color_code: self.color_code,
                 });
-            },
+            }
             byte => {
                 // If the current column position is beyond the buffer width
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line(); // start a new line
                 }
-                
+
                 // Always write to the last row
                 let row = BUFFER_HEIGHT - 1;
                 // The column is the current column position
@@ -162,10 +161,10 @@ impl Writer {
 
     // A method that starts a new line in the VGA text buffer
     fn new_line(&mut self) {
-        for row in 1..BUFFER_HEIGHT{
-            for col in 0..BUFFER_WIDTH{
+        for row in 1..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
                 let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row-1][col].write(character);
+                self.buffer.chars[row - 1][col].write(character);
             }
         }
         self.clear_row(BUFFER_HEIGHT - 1);
@@ -173,11 +172,11 @@ impl Writer {
     }
 
     fn clear_row(&mut self, row: usize) {
-        let blank = ScreenChar{
+        let blank = ScreenChar {
             ascii_character: b' ',
             color_code: self.color_code,
         };
-        for col in 0..BUFFER_WIDTH{
+        for col in 0..BUFFER_WIDTH {
             self.buffer.chars[row][col].write(blank);
         }
     }
@@ -192,24 +191,23 @@ impl Writer {
                 // not part of printable ASCII range
                 _ => self.write_byte(0xfe),
             }
-
         }
     }
 
-    pub fn set_position(&mut self, column: usize, row:usize){
+    pub fn set_position(&mut self, column: usize, row: usize) {
         if row < BUFFER_HEIGHT && column < BUFFER_WIDTH {
             self.row_position = row;
             self.column_position = column;
-            self.cursor_position = (column,row);
-        }else {
+            self.cursor_position = (column, row);
+        } else {
             panic!("Position out of bounds");
         }
     }
 
-    pub fn get_position(&self) -> (usize,usize) {
+    pub fn get_position(&self) -> (usize, usize) {
         (self.column_position, self.row_position)
     }
-    
+
     pub fn read_char(&self, x: usize, y: usize) -> char {
         // TODO: Check bounds
         self.buffer.chars[y][x].read().ascii_character as char
@@ -224,10 +222,9 @@ impl Writer {
             panic!("Write position ({}, {}) out of bounds", x, y);
         }
     }
-
 }
 
-impl fmt::Write for Writer{
+impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_string(s);
         Ok(())
@@ -238,14 +235,13 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer{
         column_position: 0,
         row_position: BUFFER_HEIGHT - 1,
-        cursor_position: (0,  BUFFER_HEIGHT - 1), 
+        cursor_position: (0,  BUFFER_HEIGHT - 1),
         color_code: ColorCode::new(Color::Green, Color::Black),
-        buffer: unsafe {&mut *(0xb8000 as *mut Buffer)}, 
+        buffer: unsafe {&mut *(0xb8000 as *mut Buffer)},
 
-        // NOTE: We have only one unsafe block. Afterwards, all operations are safe. 
+        // NOTE: We have only one unsafe block. Afterwards, all operations are safe.
     });
 }
-
 
 #[macro_export]
 macro_rules! print{
@@ -264,7 +260,7 @@ pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();    
+        WRITER.lock().write_fmt(args).unwrap();
     });
 }
 

@@ -1,6 +1,6 @@
+use super::Locked;
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::{mem, ptr, ptr::NonNull};
-use super::Locked;
 
 struct ListNode {
     next: Option<&'static mut ListNode>,
@@ -11,10 +11,9 @@ struct ListNode {
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 pub struct FixedSizeBlockAllocator {
-    list_heads: [Option<&'static mut ListNode>;BLOCK_SIZES.len()], // array of head pointers for each block size
+    list_heads: [Option<&'static mut ListNode>; BLOCK_SIZES.len()], // array of head pointers for each block size
     fallback_allocator: linked_list_allocator::Heap,
 }
-
 
 impl FixedSizeBlockAllocator {
     pub const fn new() -> Self {
@@ -25,7 +24,7 @@ impl FixedSizeBlockAllocator {
         }
     }
 
-    pub unsafe fn init(&mut self, heap_start:usize, heap_size:usize){
+    pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
         self.fallback_allocator.init(heap_start, heap_size);
     }
 
@@ -37,15 +36,12 @@ impl FixedSizeBlockAllocator {
     }
 }
 
-
-
 fn list_index(layout: &Layout) -> Option<usize> {
     let required_block_size = layout.size().max(layout.align());
     BLOCK_SIZES.iter().position(|&s| s >= required_block_size)
 }
 
-
-unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator>{
+unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();
         match list_index(&layout) {
@@ -60,8 +56,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator>{
                         let block_size = BLOCK_SIZES[index];
                         // only works if all block sizes are a power of 2
                         let block_align = block_size;
-                        let layout = Layout::from_size_align(block_size, block_align)
-                            .unwrap();
+                        let layout = Layout::from_size_align(block_size, block_align).unwrap();
                         allocator.fallback_alloc(layout)
                     }
                 }
@@ -70,7 +65,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator>{
         }
     }
 
-    unsafe fn dealloc(&self, ptr:*mut u8, layout: Layout){
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let mut allocator = self.lock();
         match list_index(&layout) {
             Some(index) => {

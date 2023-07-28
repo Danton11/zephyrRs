@@ -6,31 +6,27 @@
 
 extern crate alloc;
 
+use alloc::{boxed::Box, vec::Vec};
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use alloc::{boxed::Box, vec::Vec}; 
-use zephyrRS::{mem::allocator::HEAP_SIZE, hlt_loop};
+use zephyrRS::{hlt_loop, mem::allocator::HEAP_SIZE};
 
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    use zephyrRS::mem::allocator;
-    use zephyrRS::mem::memory::{self,BootInfoFrameAllocator};
     use x86_64::VirtAddr;
+    use zephyrRS::mem::allocator;
+    use zephyrRS::mem::memory::{self, BootInfoFrameAllocator};
 
     zephyrRS::init();
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(&boot_info.memory_map)
-    };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
     test_main();
     hlt_loop();
 }
-
-
 
 #[test_case]
 fn large_vec() {
@@ -58,7 +54,6 @@ fn simple_allocation() {
     assert_eq!(*heap_value_2, 11);
 }
 
-
 #[test_case]
 fn many_boxes_long_lived() {
     let long_lived = Box::new(1); // new
@@ -69,11 +64,7 @@ fn many_boxes_long_lived() {
     assert_eq!(*long_lived, 1); // new
 }
 
-
-
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     zephyrRS::test_panic_handler(info)
 }
-
-

@@ -1,13 +1,12 @@
-use x86_64::VirtAddr;
-use x86_64::structures::tss::TaskStateSegment;
 use lazy_static::lazy_static;
-use x86_64::structures::gdt::{GlobalDescriptorTable,Descriptor};
 use x86_64::structures::gdt::SegmentSelector;
+use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable};
+use x86_64::structures::tss::TaskStateSegment;
+use x86_64::VirtAddr;
 
-use crate::println;
+use crate::{println, serial_println};
 
-
-//Define the index into the IST for double dault handling 
+//Define the index into the IST for double dault handling
 //normally the IST starts from 1
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
@@ -21,12 +20,12 @@ lazy_static! {
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             //define size of the stack (5 pages)
             const STACK_SIZE: usize = 4096 * 5;
-            
+
             //create the stack as a static mutable array of bytes (no memory implemented yet)
             //this is unsafe because it can cause data races
             //will be safe as long the handler does not do anything that could overflow the stack
             static mut STACK: [u8; STACK_SIZE] = [0;STACK_SIZE];
-            
+
             //get the start of the stack in memory using VirtAddr
             let stack_start = VirtAddr::from_ptr(unsafe {&STACK});
             // x86 stack grows downwards, so plus
@@ -34,14 +33,14 @@ lazy_static! {
             stack_end
         };
     tss
-    };   
+    };
 }
 
-lazy_static! { 
+lazy_static! {
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         //create a new GDT
         let mut gdt = GlobalDescriptorTable::new();
-    
+
         //add a descriptor for the kernel code segment
         //this is a segment descriptor that defines the properties of the code segment,
         //such as its base address, limit and access rights
@@ -59,12 +58,11 @@ lazy_static! {
 struct Selectors {
     code_selector: SegmentSelector,
     tss_selector: SegmentSelector,
-} 
+}
 
 pub fn init() {
-
+    use x86_64::instructions::segmentation::{Segment, CS};
     use x86_64::instructions::tables::load_tss;
-    use x86_64::instructions::segmentation::{CS,Segment};
 
     GDT.0.load();
 
@@ -78,4 +76,5 @@ pub fn init() {
     }
 
     println!("Initialised GDT...");
+    serial_println!("Initalised GDT...");
 }

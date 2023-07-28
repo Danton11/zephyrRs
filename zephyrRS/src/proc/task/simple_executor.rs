@@ -1,6 +1,6 @@
 use super::Task;
 use alloc::collections::VecDeque;
-use core::task::{Waker, RawWaker, RawWakerVTable, Context, Poll};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 pub struct SimpleExecutor {
     task_queue: VecDeque<Task>,
@@ -8,15 +8,16 @@ pub struct SimpleExecutor {
 
 impl SimpleExecutor {
     pub fn new() -> SimpleExecutor {
-        SimpleExecutor { task_queue: VecDeque::new(), }
+        SimpleExecutor {
+            task_queue: VecDeque::new(),
+        }
     }
 
-    pub fn spawn(&mut self, task: Task){
+    pub fn spawn(&mut self, task: Task) {
         self.task_queue.push_back(task)
     }
 
     pub fn run(&mut self) {
-
         // for each task, create Context within a Waker instance from dummy waker
         // poll with the context, if ready continue, if pending add to the back of the queue
         while let Some(mut task) = self.task_queue.pop_front() {
@@ -31,8 +32,9 @@ impl SimpleExecutor {
 }
 
 fn dummy_raw_waker() -> RawWaker {
-    fn no_op(_: *const ()){} // no_op function takes a *const () pointer and does nothing
-    fn clone(_: *const ()) -> RawWaker {// clone function also takes a *const () pointer and returns a new RawWaker by calling dummy_raw_waker
+    fn no_op(_: *const ()) {} // no_op function takes a *const () pointer and does nothing
+    fn clone(_: *const ()) -> RawWaker {
+        // clone function also takes a *const () pointer and returns a new RawWaker by calling dummy_raw_waker
         dummy_raw_waker()
     }
 
