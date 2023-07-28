@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use core::sync::atomic::{AtomicBool,Ordering};
 
 pub const PIC_1_OFFSET: u8 = 32; // start after exception index (32)
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -81,8 +82,15 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("EXCEPTION: INVALID OPCODE at {:#?}", stack_frame);
 }
 
+static TIMER_INTERRUPT_OCCURED: AtomicBool = AtomicBool::new(false);
+pub fn timer_interrupt_occurred() -> bool {
+    //SWAP the boolean
+    TIMER_INTERRUPT_OCCURED.swap(false, Ordering::SeqCst)
+}
+
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     //   print!(".");
+    TIMER_INTERRUPT_OCCURED.store(true, Ordering::SeqCst);
 
     unsafe {
         PICS.lock()
