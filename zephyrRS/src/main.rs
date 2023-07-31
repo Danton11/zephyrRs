@@ -31,8 +31,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator =
-        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    
+
+    let total_mem = frame_allocator.total_usable_size();
+    serial_println!("Total usable physical memory: {} bytes", total_mem);
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
 
@@ -44,12 +47,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
 
-    executor.1.spawn(Task::new(keyboard::output_keypress()));
-    executor.1.spawn(Task::new(example_task()));
-    executor.1.spawn(Task::new(task_a())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    executor.1.spawn(Task::new(task_b())); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(keyboard::output_keypress(),5));
+    executor.1.spawn(Task::new(example_task(),1));
+    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
 
     executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return
+
 }
 
 /// This function is called on panic.
