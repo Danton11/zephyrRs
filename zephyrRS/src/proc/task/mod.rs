@@ -9,7 +9,7 @@ pub mod executor;
 pub mod simple_executor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TaskID(u64);
+pub struct TaskID(u64);
 
 impl TaskID {
     fn new() -> Self {
@@ -18,15 +18,39 @@ impl TaskID {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TaskPriority(u8);
+
+impl TaskPriority {
+    fn new(prio: u8) -> Self {
+        TaskPriority(prio)
+    }
+
+    fn value(self) -> u8 {
+        self.0
+    }
+    
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    Running,
+    Paused,
+}
+
 pub struct Task {
     id: TaskID,
+    priority: TaskPriority,
+    state: TaskState,
     future: Pin<Box<dyn Future<Output = ()>>>,
 }
 
 impl Task {
-    pub fn new(future: impl Future<Output = ()> + 'static) -> Task {
+    pub fn new(future: impl Future<Output = ()> + 'static, priority: u8) -> Task {
         Task {
             id: TaskID::new(),
+            priority: TaskPriority::new(priority),
+            state: TaskState::Paused,
             future: Box::pin(future),
         }
     }

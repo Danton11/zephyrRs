@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use zephyrRS::{hlt_loop, mem::allocator::HEAP_SIZE};
+use zephyrRS::{hlt_loop, mem::allocator::HEAP_SIZE, serial_println};
 
 entry_point!(main);
 
@@ -68,3 +68,29 @@ fn many_boxes_long_lived() {
 fn panic(info: &PanicInfo) -> ! {
     zephyrRS::test_panic_handler(info)
 }
+
+
+
+#[test_case]
+fn nested_allocation() {
+    let mut outer = Vec::new();
+    for _ in 0..50 {
+        outer.push(Box::new(0));
+    }
+    for (i, inner) in outer.iter().enumerate() {
+        assert_eq!(**inner, 0, "at index {}", i);
+    }
+}
+
+#[should_panic]
+#[test_case]
+fn out_of_memory() {
+    use alloc::vec;
+    let mut v = vec![0u8; 1024];
+    loop {
+        v.push(0);
+    }
+}
+
+
+
