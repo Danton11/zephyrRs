@@ -68,7 +68,7 @@ pub async fn yield_now() {
 
     impl Future for YieldNow {
         type Output = ();
-
+ 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if self.polled_once {
                 Poll::Ready(())
@@ -128,6 +128,29 @@ pub async fn task_b() {
 
             if b == 100 {
                 println!("Process B complete.");
+                break;
+            }
+
+            if timer_interrupt_occurred() {
+                yield_now().await;
+                continue;
+            }
+        }
+        a += 5;
+    }
+}
+
+pub async fn task_c() {
+    let mut a: u32 = 0;
+    let mut b: u8 = 0;
+    loop {
+        if a == 100_000_000 {
+            println!("Process C running. {}% complete.", b);
+            a = 0;
+            b += 2;
+
+            if b == 100 {
+                println!("Process C complete.");
                 break;
             }
 

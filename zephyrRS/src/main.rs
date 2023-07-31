@@ -12,7 +12,7 @@ use zephyrRS::dev::keyboard;
 use zephyrRS::mem::allocator;
 use zephyrRS::mem::memory;
 use zephyrRS::proc::task::executor::Executor;
-use zephyrRS::proc::task::{example_task, task_a, task_b, Task};
+use zephyrRS::proc::task::{example_task, task_a, task_b, task_c, Task};
 use zephyrRS::{println, serial_println};
 
 extern crate alloc;
@@ -49,8 +49,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     executor.1.spawn(Task::new(keyboard::output_keypress(),5));
     executor.1.spawn(Task::new(example_task(),1));
-    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+//    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+  //  executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    //executor.1.spawn(Task::new(task_c(),3)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
 
     executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return
 

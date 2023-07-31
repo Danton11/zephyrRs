@@ -12,6 +12,8 @@ use futures_util::{
     task::AtomicWaker,
 };
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+use super::vga_buffer::BUFFER_WIDTH;
 // Represents a stream of scancodes
 pub struct ScancodeStream {
     _private: (),
@@ -82,13 +84,14 @@ pub async fn output_keypress() {
             //print!("key event: {:?}",key_press);
             if let Some(key) = keyboard.process_keyevent(key_press) {
                 //println!("Decoded key: {:?}", key);
+            
+                let mut pos = crate::vga_buffer::WRITER.lock().get_position();
                 match key {
                     DecodedKey::Unicode(char) => {
                         match char {
                             '\u{8}' => {
                                 //print!("bspace");
                                 // get current position of cursor
-                                let pos = crate::vga_buffer::WRITER.lock().get_position();
 
                                 // check if the cursor is not at the start of the line
                                 if pos.0 > 0 {
@@ -108,41 +111,38 @@ pub async fn output_keypress() {
                                 }
                             }
 
+                            
                             '\u{7f}' => {
                                 // ASCII for Delete key
                                 // Get the current position of the cursor
                                 let pos = crate::vga_buffer::WRITER.lock().get_position();
 
-                                // Find the last non-space character on the line
-                                let end = (pos.0..80)
-                                    .rposition(|col| {
-                                        crate::vga_buffer::WRITER.lock().read_char(col, pos.1)
-                                            != ' '
-                                    })
-                                    .unwrap_or(pos.0);
+                                // Check if we're not at the end of the line
+                                if pos.0 < BUFFER_WIDTH - 1 {
+                                    // Read all characters to the right of the cursor
+                                    let chars_to_right: Vec<char> = ((pos.0 + 1)..BUFFER_WIDTH)
+                                        .map(|col| {
+                                            crate::vga_buffer::WRITER.lock().read_char(col, pos.1)
+                                        })
+                                        .collect();
 
-                                // Read all characters to the right of the cursor up to the last non-space character
-                                let chars_to_right: Vec<char> = (pos.0..end)
-                                    .map(|col| {
-                                        crate::vga_buffer::WRITER.lock().read_char(col, pos.1)
-                                    })
-                                    .collect();
+                                    // Write the characters back, shifted one position to the left
+                                    for (i, &c) in chars_to_right.iter().enumerate() {
+                                        crate::vga_buffer::WRITER.lock().write_char_at(
+                                            pos.0 + i,
+                                            pos.1,
+                                            c,
+                                        );
+                                    }
 
-                                // Write the characters back, shifted one position to the left
-                                for (i, &c) in chars_to_right.iter().enumerate() {
-                                    crate::vga_buffer::WRITER.lock().write_char_at(
-                                        pos.0 + i,
-                                        pos.1,
-                                        c,
-                                    );
+                                    // Clear the last character on the line
+                                    crate::vga_buffer::WRITER
+                                        .lock()
+                                        .write_char_at(BUFFER_WIDTH - 1, pos.1, ' ');
                                 }
-
-                                // Clear the last character on the line
-                                crate::vga_buffer::WRITER
-                                    .lock()
-                                    .write_char_at(end, pos.1, ' ');
                             }
-                            _ => print!("{}", char),
+
+                                    _ => print!("{}", char),
                         }
                     }
                     DecodedKey::RawKey(key) => match key {
@@ -162,6 +162,7 @@ pub async fn output_keypress() {
                             let (x, y) = crate::vga_buffer::WRITER.lock().get_position();
                             if x > 0 {
                                 crate::vga_buffer::WRITER.lock().set_position(x - 1, y);
+                                pos.0 -= 1;
                             }
                         }
                         pc_keyboard::KeyCode::ArrowRight => {

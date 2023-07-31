@@ -26,7 +26,7 @@ pub struct Spawner {
 impl Executor {
     pub fn new() -> (Self, Spawner) {
         let mut task_queues = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..10{
             task_queues.push(Arc::new(ArrayQueue::new(100)));
         }
 

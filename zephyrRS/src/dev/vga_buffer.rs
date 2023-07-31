@@ -78,8 +78,8 @@ struct ScreenChar {
 } // This structure represents a character that can be drawn on the screen. It includes the ASCII value of the character (ascii_character) and the color code that should be used to display it (color_code). The #[repr(C)] attribute ensures that the structure layout is in the C-style, where the fields are laid out in the order specified.
 
 // These constants represent the dimensions of the text buffer, which are likely the dimensions of the text mode VGA screen (80 columns wide by 25 rows high).
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 80;
+pub const BUFFER_HEIGHT: usize = 25;
+pub const BUFFER_WIDTH: usize = 80;
 
 // Buffer: This structure represents the VGA buffer. It's a 2D array (BUFFER_HEIGHT by BUFFER_WIDTH) of ScreenChar. The #[repr(transparent)] attribute indicates that this struct should have the same memory layout as its only field. This is useful for safety when performing operations that depend on the layout like FFI or interfacing with hardware, as in this case where you're directly interfacing with VGA memory.
 #[repr(transparent)]
@@ -119,19 +119,20 @@ impl Writer {
             }
             0x7f => {
                 // ASCII for Delete key
-                let (x, y) = self.get_position();
+                //let (y,x) = self.get_position();
+
                 // Shift all characters to the right of the cursor to the left
-                for i in x..BUFFER_WIDTH - 1 {
+                for i in self.column_position..BUFFER_WIDTH - 1 {
                     let ScreenChar {
                         ascii_character: c, ..
-                    } = self.buffer.chars[y][i + 1].read();
-                    self.buffer.chars[y][i].write(ScreenChar {
+                    } = self.buffer.chars[i + 1][self.row_position].read();
+                    self.buffer.chars[i][self.row_position].write(ScreenChar {
                         ascii_character: c,
                         color_code: self.color_code,
                     });
                 }
                 // Clear the last character on the line
-                self.buffer.chars[y][BUFFER_WIDTH - 1].write(ScreenChar {
+                self.buffer.chars[BUFFER_WIDTH - 1][self.row_position].write(ScreenChar {
                     ascii_character: b' ',
                     color_code: self.color_code,
                 });
