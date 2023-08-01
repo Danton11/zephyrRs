@@ -22,7 +22,7 @@ entry_point!(kernel_main); // tells the bootloader where entry point is, instead
 // entry point
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ! sets a diverging return value
-    // this function is the entry point
+     // this function is the entry point
 
     println!("[] - Setting up ZephyrRS!"); // this println! uses the macro defined in vga_buffer.rs
     serial_println!("\n\n[] - Setting up ZephyrRS!");
@@ -48,10 +48,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
 
     executor.1.spawn(Task::new(keyboard::output_keypress(),5));
-    executor.1.spawn(Task::new(example_task(),1));
-//    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-  //  executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    //executor.1.spawn(Task::new(task_c(),3)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(example_task(),4));
+    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+    executor.1.spawn(Task::new(task_c(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
 
     executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return
 
