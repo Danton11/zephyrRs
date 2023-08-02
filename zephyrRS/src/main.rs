@@ -27,7 +27,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("[] - Setting up ZephyrRS!"); // this println! uses the macro defined in vga_buffer.rs
     serial_println!("\n\n[] - Setting up ZephyrRS!");
     // if the cfg attribute 'test' is set, call the function test_main
-    zephyrRS::init(); // call init fn from lib.rs for creating interrupt handler
+    zephyrRS::init(); // call init fn from lib.rs for creating gdt, idt and mem
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
@@ -49,9 +49,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     executor.1.spawn(Task::new(keyboard::output_keypress(),5));
     executor.1.spawn(Task::new(example_task(),4));
-    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-    executor.1.spawn(Task::new(task_c(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+//    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+//    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
+//    executor.1.spawn(Task::new(task_c(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
 
     executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return
 

@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use bootloader::BootInfo;
 
 pub mod boot;
 pub mod dev;
@@ -23,16 +24,14 @@ pub fn init() {
     boot::interrupts::init_idt();
     unsafe { boot::interrupts::PICS.lock().initialize() }; // initialise PIC ( hardware interrupts)
     x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
+    //mem::memory::init_mem(boot_info);
 }
 
 pub trait Testable {
     fn run(&self) -> ();
 }
 
-impl<T> Testable for T
-where
-    T: Fn(),
-{
+impl<T> Testable for T where T: Fn(), {
     fn run(&self) {
         serial_print!("{}...\t", core::any::type_name::<T>()); // type_name gets the name of the function/test being run
         self(); //invoke the test
@@ -79,14 +78,14 @@ pub fn hlt_loop() -> ! {
 }
 
 #[cfg(test)]
-use bootloader::{entry_point, BootInfo};
+use bootloader::entry_point;
 
 #[cfg(test)]
 entry_point!(test_kernel_main);
 
 #[cfg(test)]
 fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
-    init();
+    init(_boot_info);
     test_main();
     hlt_loop();
 }

@@ -6,7 +6,6 @@ use core::task::{Context, Poll};
 use core::{future::Future, pin::Pin};
 
 pub mod executor;
-pub mod simple_executor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TaskID(u64);
