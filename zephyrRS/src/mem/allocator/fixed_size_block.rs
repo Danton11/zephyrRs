@@ -23,7 +23,8 @@ impl FixedSizeBlockAllocator {
             fallback_allocator: linked_list_allocator::Heap::empty(),
         }
     }
-
+    
+    // create allocator for heap bounds
     pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
         self.fallback_allocator.init(heap_start, heap_size);
     }
@@ -41,6 +42,7 @@ fn list_index(layout: &Layout) -> Option<usize> {
     BLOCK_SIZES.iter().position(|&s| s >= required_block_size)
 }
 
+// Defines allocator for alloc crate to create dynamic memory
 unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();
@@ -52,9 +54,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                         node as *mut ListNode as *mut u8
                     }
                     None => {
-                        // no block exists in list => allocate new block
                         let block_size = BLOCK_SIZES[index];
-                        // only works if all block sizes are a power of 2
                         let block_align = block_size;
                         let layout = Layout::from_size_align(block_size, block_align).unwrap();
                         allocator.fallback_alloc(layout)
@@ -63,9 +63,9 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
             }
             None => allocator.fallback_alloc(layout),
         }
-    }
+    } 
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { 
         let mut allocator = self.lock();
         match list_index(&layout) {
             Some(index) => {
