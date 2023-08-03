@@ -6,6 +6,8 @@
 #![allow(non_snake_case)]
 #![feature(abi_x86_interrupt)]
 #![feature(const_mut_refs)]
+#![feature(naked_functions)]
+#![feature(asm_sym)]
 extern crate alloc;
 
 use core::panic::PanicInfo;
@@ -24,7 +26,6 @@ pub fn init() {
     boot::interrupts::init_idt();
     unsafe { boot::interrupts::PICS.lock().initialize() }; // initialise PIC ( hardware interrupts)
     x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
-    //mem::memory::init_mem(boot_info);
 }
 
 pub trait Testable {

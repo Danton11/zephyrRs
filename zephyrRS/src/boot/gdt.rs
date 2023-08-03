@@ -1,4 +1,5 @@
 use lazy_static::lazy_static;
+use spin::Mutex;
 use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable};
 use x86_64::structures::tss::TaskStateSegment;
@@ -9,10 +10,13 @@ use crate::{println, serial_println};
 //Define the index into the IST for double dault handling
 //normally the IST starts from 1
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const PAGE_FAULT_IST_INDEX: u16 = 0;
+pub const GENERAL_PROTECTION_FAULT_IST_INDEX: u16 = 0;
+pub const TIMER_INTERRUPT_INDEX: u16 = 1; 
 
 // lazy initialise the TSS
 lazy_static! {
-    static ref TSS: TaskStateSegment = {
+    static ref TSS: Mutex<TaskStateSegment> = {
         //create the TSS
         let mut tss = TaskStateSegment::new();
 
@@ -32,8 +36,19 @@ lazy_static! {
             let stack_end = stack_start + STACK_SIZE;
             stack_end
         };
-    tss
+        tss.interrupt_stack_table[TIMER_INTERRUPT_INDEX as usize] = tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize];
+        
+        Mutex::new(tss)
     };
+}
+
+unsafe fn tss_ref() -> &'static TaskStateSegment {
+    let tss_ptr = &*TSS.lock() as *const TaskStateSegment;
+    & *tss_ptr
+}
+
+pub fn set_interrupt_stack_table(index: usize, stack_end: VirtAddr){
+    TSS.lock().interrupt_stack_table[index] = stack_end;
 }
 
 lazy_static! {
@@ -45,23 +60,29 @@ lazy_static! {
         //this is a segment descriptor that defines the properties of the code segment,
         //such as its base address, limit and access rights
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+        let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
 
         //add a descriptor for the task state segment
         //this is a special kind of segment descriptor that doesn't describe a segment
         //but rather a data structure used by the CPU for task switches and interrupts
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+        let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe {tss_ref()}));
         //return the gdt and the selectors
-        (gdt, Selectors { code_selector, tss_selector })
+        (gdt, Selectors { code_selector, data_selector, tss_selector })
     };
+}
+
+pub fn get_kernel_segments() -> (SegmentSelector, SegmentSelector) {
+    (GDT.1.code_selector,GDT.1.data_selector)
 }
 
 struct Selectors {
     code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
 pub fn init() {
-    use x86_64::instructions::segmentation::{Segment, CS};
+    use x86_64::instructions::segmentation::{Segment, CS, DS};
     use x86_64::instructions::tables::load_tss;
 
     GDT.0.load();
@@ -70,11 +91,13 @@ pub fn init() {
     unsafe {
         // tells the cpu where to find the code segment
         CS::set_reg(GDT.1.code_selector);
+        DS::set_reg(GDT.1.data_selector);
 
-        // tells the cpu where to find the code segment
         load_tss(GDT.1.tss_selector);
     }
 
     println!("Initialised GDT...");
     serial_println!("Initalised GDT...");
 }
+
+

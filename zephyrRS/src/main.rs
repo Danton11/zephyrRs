@@ -6,6 +6,7 @@
 #![reexport_test_harness_main = "test_main"] // re-exports the test harness main as "test_main"
 
 use bootloader::{entry_point, BootInfo};
+use zephyrRS::hlt_loop;
 use core::panic::PanicInfo;
 use x86_64::VirtAddr;
 use zephyrRS::dev::keyboard;
@@ -14,11 +15,31 @@ use zephyrRS::mem::memory;
 use zephyrRS::proc::task::executor::Executor;
 use zephyrRS::proc::task::{example_task, task_a, task_b, task_c, Task};
 use zephyrRS::{println, serial_println};
+use zephyrRS::proc::process;
+use core::arch::asm;
 
 extern crate alloc;
 
 entry_point!(kernel_main); // tells the bootloader where entry point is, instead of _start()
 
+fn kernel_thread(){
+    serial_println!("Kernel Thread!");
+    process::spawn_kernel_thread(test_kernel_fn2);
+    loop {
+        println!("[[ 1 ]]");
+        x86_64::instructions::hlt();
+    }
+}
+
+
+fn test_kernel_fn2() {
+    println!("Hello from kernel function 2!");
+
+    loop {
+        println!("       [[ 2 ]]");
+        x86_64::instructions::hlt();
+    }
+}
 // entry point
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ! sets a diverging return value
@@ -28,33 +49,20 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("\n\n[] - Setting up ZephyrRS!");
     // if the cfg attribute 'test' is set, call the function test_main
     zephyrRS::init(); // call init fn from lib.rs for creating gdt, idt and mem
-
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
     
-
-    let total_mem = frame_allocator.total_usable_size();
-    serial_println!("Total usable physical memory: {} bytes", total_mem);
-
-    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
+    
+    memory::init(boot_info);
 
     #[cfg(test)]
     test_main();
 
     println!("Successfully initialised Kernel");
     serial_println!("[] - Successfully initialised Kernel");
+    
+    //process::spawn_kernel_thread(kernel_thread);
+    //process::spawn_user_thread(include_bytes!("../user/exec"));
 
-    let mut executor = Executor::new(); // SimpleExecutor is made with empty queue
-
-    executor.1.spawn(Task::new(keyboard::output_keypress(),5));
-    executor.1.spawn(Task::new(example_task(),4));
-//    executor.1.spawn(Task::new(task_a(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-//    executor.1.spawn(Task::new(task_b(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-//    executor.1.spawn(Task::new(task_c(),2)); // wrap the future from example_task in Task, which pins it on the heap, 'spawn' adds it the queue
-
-    executor.0.run(); // pop the task, create rawwaker for task, call the poll method, check if Poll::ready, if not add to back of the queue, else return
-
+    hlt_loop();
 }
 
 /// This function is called on panic.

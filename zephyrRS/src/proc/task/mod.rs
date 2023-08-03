@@ -1,4 +1,3 @@
-use crate::boot::interrupts::timer_interrupt_occurred;
 use crate::{println, serial_println};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -107,16 +106,13 @@ pub async fn task_a() {
                 break;
             }
             
-            if timer_interrupt_occurred() {
-                yield_now().await;
-                continue;
-            }
+           
         }
         a += 5;
     }
 }
 
-pub async fn task_b() {
+pub async fn task_b() { 
     let mut a: u32 = 0;
     let mut b: u8 = 0;
     loop {
@@ -130,10 +126,6 @@ pub async fn task_b() {
                 break;
             }
 
-            if timer_interrupt_occurred() {
-                yield_now().await;
-                continue;
-            }
         }
         a += 5;
     }
@@ -153,10 +145,6 @@ pub async fn task_c() {
                 break;
             }
 
-            if timer_interrupt_occurred() {
-                yield_now().await;
-                continue;
-            }
         }
         a += 5;
     }

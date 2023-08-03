@@ -2,39 +2,62 @@ use crate::{println, serial_println};
 use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
 use x86_64::{structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive,},PhysAddr, VirtAddr,};
 use core::sync::atomic::{AtomicU64, Ordering};
+use crate::mem::allocator;
 
 
-// init all physical mem and heap
-pub fn init_mem(boot_info: &'static BootInfo) {
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    
-
-    let total_mem = frame_allocator.total_usable_size();
-    serial_println!("Total usable physical memory: {} bytes", total_mem);
-
-    crate::mem::allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Heap initiliasation failed"); // init the heap using mapper and BootInfoFrameAllocator
-}
 
 //Remember that page tables are used by the MMU (Memory Management Unit) to translate virtual addresses to physical addresses. When a program accesses an address, it provides a virtual address, which the MMU then translates to a physical address. The physical address is then used to access the actual data in memory. The mapping from virtual to physical addresses is done through a set of hierarchical page tables.
 
 ///- `init`: This function initializes an `OffsetPageTable` which can translate virtual addresses to physical addresses and vice versa. It requires the `physical_memory_offset` which indicates the difference between the physical and virtual address of a page.
 
-/// Initialize a new OffsetPageTable.
-pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
-    let level_4_table = active_level_4_table(physical_memory_offset);
-    println!("Initialised page tables...");
-    serial_println!("Initialised page tables...");
-    
-    //for (i,entry) in level_4_table.iter().enumerate() {
-    //    if !entry.is_unused() {
-    //        println!("Entry({}): {:?}", i,entry);
-    //    }
-    //}
+pub fn init(boot_info: &'static BootInfo) {
+    use x86_64::instructions::interrupts;
+    use x86_64::structures::paging::Translate; // provides translate_addr
 
+    interrupts::without_interrupts(|| {
+        let mut memory_size = 0;
+        for region in boot_info.memory_map.iter() {
+            let start_addr = region.range.start_addr();
+            let end_addr = region.range.end_addr();
+            memory_size += end_addr - start_addr;
+            println!("MEM [{:#016X}-{:#016X}] {:?}\n", start_addr, end_addr, region.region_type);
+            serial_println!("MEM [{:#016X}-{:#016X}] {:?}\n", start_addr, end_addr, region.region_type);
+        }
+        println!("Memory size: {} KB\n", memory_size >> 10);
+        serial_println!("Memory size: {} KB\n", memory_size >> 10);
 
-    OffsetPageTable::new(level_4_table, physical_memory_offset)
+        let phys_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
+
+        let level_4_table = unsafe {active_level_4_table(phys_memory_offset)};
+
+        // Initialise the memory mapper
+        let mut mapper = unsafe {OffsetPageTable::new(level_4_table, phys_memory_offset)};
+        let mut frame_allocator = unsafe {
+            BootInfoFrameAllocator::init(&boot_info.memory_map)
+        };
+
+        let addresses = [
+            // the identity-mapped vga buffer page
+            0xb8000,
+            // some code page
+            0x201008,
+            // some stack page
+            0x0100_0020_1a10,
+            // virtual address mapped to physical address 0
+            boot_info.physical_memory_offset,
+        ];
+
+        for &address in &addresses {
+            let virt = VirtAddr::new(address);
+            // new: use the `mapper.translate_addr` method
+            let phys = mapper.translate_addr(virt);
+            println!("{:?} -> {:?}", virt, phys);
+            serial_println!("{:?} -> {:?}", virt, phys);
+        }
+
+        allocator::init_heap(&mut mapper, &mut frame_allocator)
+            .expect("heap initialization failed");
+    });
 }
 
 ///- `active_level_4_table`: This function returns a mutable reference to the level 4 page table currently active in the CPU. It reads the value from the CR3 register (which contains the physical address of the active level 4 table) and converts it to the equivalent virtual address using the provided `physical_memory_offset`.
