@@ -1,10 +1,22 @@
 use crate::{println, serial_println};
 use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
-use x86_64::{structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive,},PhysAddr, VirtAddr,};
+use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive,},PhysAddr, VirtAddr,};
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::mem::allocator;
 
+struct MemoryInfo {
+    boot_info: &'static BootInfo,
 
+    physical_memory_offset: VirtAddr,
+
+    /// Allocate empty frames
+    frame_allocator: BootInfoFrameAllocator
+}
+
+/// Store BootInfo struct and other useful things for later use
+/// This is set in the init() function and should not be
+/// modified after that.
+static mut MEMORY_INFO: Option<MemoryInfo> = None;
 
 //Remember that page tables are used by the MMU (Memory Management Unit) to translate virtual addresses to physical addresses. When a program accesses an address, it provides a virtual address, which the MMU then translates to a physical address. The physical address is then used to access the actual data in memory. The mapping from virtual to physical addresses is done through a set of hierarchical page tables.
 
@@ -57,6 +69,13 @@ pub fn init(boot_info: &'static BootInfo) {
 
         allocator::init_heap(&mut mapper, &mut frame_allocator)
             .expect("heap initialization failed");
+
+        // Store boot_info for later calls
+        unsafe { MEMORY_INFO = Some(MemoryInfo {
+            boot_info,
+            physical_memory_offset: phys_memory_offset,
+            frame_allocator
+        }) };
     });
 }
 
@@ -159,38 +178,69 @@ static NEXT_PAGE_ADDR: AtomicU64 = AtomicU64::new(0x1000);  // Start at 0x1000
 const MAX_ADDR: u64 = 0xFFFF_FFFF_FFFF_F000;
 
 use x86_64::structures::paging::PageTableFlags;
+///////////////////////////////////////////////////////////////////////
+// Routines to allocate memory in a single page table
 
-// ... rest of your code ...
+/// Allocate pages in the specified page table
+/// starting at the page containing virtual address \p start_addr
+/// and large enough to contain \p size bytes.
+///
+/// \p flags  PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+pub fn allocate_pages_mapper(
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    mapper: &mut impl Mapper<Size4KiB>,
+    start_addr: VirtAddr,
+    size: u64,
+    flags: PageTableFlags)
+    -> Result<(), MapToError<Size4KiB>> {
 
-pub fn allocate_page(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) -> Result<VirtAddr, &'static str> {
-    // Allocate a frame of physical memory
-    let frame = frame_allocator.allocate_frame().ok_or("Out of memory")?;
+    let page_range = {
+        let end_addr = start_addr + size - 1u64;
+        let start_page = Page::containing_address(start_addr);
+        let end_page = Page::containing_address(end_addr);
+        Page::range_inclusive(start_page, end_page)
+    };
 
-    // Generate a virtual page address
-    let mut page_addr = NEXT_PAGE_ADDR.load(Ordering::SeqCst);
-
-    // Create a virtual page at the next unused address
-    let mut page = Page::containing_address(VirtAddr::new(page_addr));
-
-    // Check if a virtual page at the chosen address already exists
-    while mapper.translate_page(page).is_ok() {
-        // If it exists, increment the address and try again
-        page_addr = NEXT_PAGE_ADDR.fetch_add(0x1000, Ordering::SeqCst);
-        // If we have reached the maximum address, return an error
-        if page_addr >= MAX_ADDR {
-            return Err("No virtual address space left");
-        }
-        page = Page::containing_address(VirtAddr::new(page_addr));
+    for page in page_range {
+        let frame = frame_allocator
+            .allocate_frame()
+            .ok_or(MapToError::FrameAllocationFailed)?;
+        unsafe {
+            mapper.map_to(page,
+                          frame,
+                          flags,
+                          frame_allocator)?.flush()
+        };
     }
 
-    // Map the page to the allocated frame
-    let page_table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-    unsafe {
-        mapper.map_to(page, frame, page_table_flags, &mut *frame_allocator).map_err(|_| "Failed to create mapping")?;
-    }
+    Ok(())
+}
 
-    // Return the start address of the page
-    Ok(page.start_address())
+pub fn create_user_pagetable() -> *mut PageTable {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+
+    let table = unsafe {active_level_4_table(memory_info.physical_memory_offset)};
+
+    table as *mut PageTable
+}
+
+
+pub fn allocate_pages(level_4_table: *mut PageTable,
+                      start_addr: VirtAddr,
+                      size: u64,
+                      flags: PageTableFlags)
+                      -> Result<(), MapToError<Size4KiB>> {
+
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+
+    let mut mapper = unsafe {
+        OffsetPageTable::new(&mut *level_4_table,
+                             memory_info.physical_memory_offset)};
+
+    allocate_pages_mapper(
+        &mut memory_info.frame_allocator,
+        &mut mapper,
+        start_addr, size, flags)
 }
 
 pub fn deallocate_page(mapper: &mut impl Mapper<Size4KiB>,address:u64,size:usize){

@@ -66,8 +66,13 @@ lazy_static! {
         //this is a special kind of segment descriptor that doesn't describe a segment
         //but rather a data structure used by the CPU for task switches and interrupts
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe {tss_ref()}));
+
+        let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
+        let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
+
+
         //return the gdt and the selectors
-        (gdt, Selectors { code_selector, data_selector, tss_selector })
+        (gdt, Selectors { code_selector, data_selector, tss_selector, user_code_selector, user_data_selector })
     };
 }
 
@@ -75,10 +80,17 @@ pub fn get_kernel_segments() -> (SegmentSelector, SegmentSelector) {
     (GDT.1.code_selector,GDT.1.data_selector)
 }
 
+pub fn get_user_segments() -> (SegmentSelector, SegmentSelector) {
+    (GDT.1.user_code_selector,GDT.1.user_data_selector)
+}
+
+
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector
 }
 
 pub fn init() {

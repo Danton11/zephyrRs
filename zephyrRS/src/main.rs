@@ -60,7 +60,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[] - Successfully initialised Kernel");
     
     //process::spawn_kernel_thread(kernel_thread);
-    //process::spawn_user_thread(include_bytes!("../user/exec"));
+    process::spawn_user_thread(include_bytes!("../user/hello"));
 
     hlt_loop();
 }

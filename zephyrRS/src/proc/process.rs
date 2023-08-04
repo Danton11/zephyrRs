@@ -7,13 +7,19 @@ use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
 use object::{Object, ObjectSegment};
 use crate::boot::interrupts::{CPUContext,INTERRUPT_CONTEXT_SIZE};
 use crate::boot::gdt;
+use crate::mem::memory;
 use crate::{serial_println,println};
+use x86_64::structures::paging::PageTableFlags;
 
 
 
 // Defining the size of kernel and user stacks
 const KERNEL_STACK_SIZE: usize = 4096 * 2;
 const USER_STACK_SIZE: usize   = 4096 * 5;
+const USER_CODE_START: u64 = 0x5000000;
+const USER_CODE_END: u64 = 0x80000000;
+
+
 
 // Thread struct represents a single thread in the OS. It contains 
 // the kernel stack, user stack, their ends, and the context (register state).
@@ -70,7 +76,7 @@ pub fn spawn_kernel_thread(function: fn()->()) {
 
     let (code_selector, data_selector) = gdt::get_kernel_segments();
     context.cs = code_selector.0 as usize;
-    context.ss = data_selector.0 as usize;    
+    //context.ss = data_selector.0 as usize;    
 
     // Add the new thread to the running queue.
     interrupts::without_interrupts(|| {
@@ -87,15 +93,42 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<usize,&'static str>{
 
     if let Ok(obj) = object::File::parse(bin) {
         let entry_point = obj.entry();
-        println!("Entry point: {:#016X}", entry_point);
-        serial_println!("Entry point: {:#016X}", entry_point);
+        let user_page_table_ptr = memory::create_user_pagetable();
 
         for segment in obj.segments() {
-            println!("Section {:?} : {:#016X}", segment.name(), segment.address());
-            serial_println!("Section {:?} : {:#016X}", segment.name(), segment.address());
+    	    let segment_address = segment.address() as u64;
+            println!("Section {:?} : {:#016X}", segment.name(), segment_address);
+            serial_println!("Section {:?} : {:#016X}", segment.name(), segment_address);
+
+
+            let start_address = VirtAddr::new(segment_address);
+            let end_address = start_address + segment.size() as u64;
+            if (start_address < VirtAddr::new(USER_CODE_START))
+                || (end_address >= VirtAddr::new(USER_CODE_END)) {
+                    return Err("ELF segment outside allowed range");
+            }
+
+
+            if memory::allocate_pages(user_page_table_ptr, VirtAddr::new(segment_address),segment.size() as u64,
+                           PageTableFlags::PRESENT |
+                           PageTableFlags::WRITABLE |
+                           PageTableFlags::USER_ACCESSIBLE).is_err() {
+                return Err("Failed to allocate memory for thread");
+            }
+
+            if let Ok(data)= segment.data() {
+                let new_ptr = segment_address as *mut u8;
+                for (i,value) in data.iter().enumerate(){
+                    unsafe {
+                        let ptr = new_ptr.add(i);
+                        core::ptr::write(ptr, *value);
+                    }
+                }
+            }
+
         }
         return Ok(0);
-    }
+    } 
     Err("Could not parse ELF")
 
 }
