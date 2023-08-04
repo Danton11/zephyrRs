@@ -7,7 +7,7 @@
 #![feature(abi_x86_interrupt)]
 #![feature(const_mut_refs)]
 #![feature(naked_functions)]
-#![feature(asm_sym)]
+//#![feature(asm_sym)]
 extern crate alloc;
 
 use core::panic::PanicInfo;
@@ -17,6 +17,7 @@ pub mod boot;
 pub mod dev;
 pub mod mem;
 pub mod proc;
+pub mod syscall;
 
 use dev::vga_buffer;
 

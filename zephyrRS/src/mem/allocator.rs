@@ -33,8 +33,8 @@ pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>,frame_allocator: &mut impl F
 
     unsafe { ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE) }
 
-    println!("Initialised Heap...");
-    serial_println!("Initialised Heap...");
+    println!("[] - Initialised Heap...");
+    serial_println!("[] - Initialised Heap...");
     Ok(())
 }
 
