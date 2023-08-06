@@ -7,11 +7,12 @@
 #![feature(abi_x86_interrupt)]
 #![feature(const_mut_refs)]
 #![feature(naked_functions)]
-//#![feature(asm_sym)]
+#![feature(asm_const)]
+#![allow(unused_imports)]
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use bootloader::BootInfo;
+//use bootloader::BootInfo;
 
 pub mod boot;
 pub mod dev;

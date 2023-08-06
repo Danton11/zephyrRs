@@ -7,6 +7,8 @@ use x86_64::structures::paging::PageTableFlags;
 use core::arch::asm;
 
 
+const THREAD_STACK_PAGE_INDEX: [u8;3] = [5,0,0];
+
 struct MemoryInfo {
     boot_info: &'static BootInfo,
     phys_memory_offset: VirtAddr,
@@ -107,6 +109,11 @@ fn copy_pagetables(level_4_table: &PageTable) -> (*mut PageTable, u64) {
     return (table_ptr, table_physaddr)
 }
 
+pub fn active_pagetable_ptr() -> *mut PageTable {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let virt = memory_info.phys_memory_offset + active_pagetable_physaddr();
+    virt.as_mut_ptr()
+}
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
@@ -200,6 +207,73 @@ pub fn active_pagetable_physaddr() -> u64 {
     }
     physaddr
 }
+
+pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), &'static str> {
+  
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+
+    let mut table = unsafe {&mut *level_4_table};
+    for index in THREAD_STACK_PAGE_INDEX {
+        let entry = &mut table[index as usize];
+        if entry.is_unused() {
+            // Page not allocated -> Create page table
+            let (_new_table_ptr, new_table_physaddr) = create_pagetable();
+            entry.set_addr(PhysAddr::new(new_table_physaddr),
+                           PageTableFlags::PRESENT |
+                           PageTableFlags::WRITABLE |
+                           PageTableFlags::USER_ACCESSIBLE);
+        }
+        table = unsafe {&mut *(memory_info.phys_memory_offset
+                               + entry.addr().as_u64()).as_mut_ptr()};
+    }
+
+    // Table should now be the level 1 page table
+    //
+    // Find an unused set of 8 pages. The lowest page is always unused
+    // (guard), but the first should be used so look in pages
+    // (1 + 8*n) where n=0..64
+    //
+    // Choose a random n to start looking, and check entries
+    // sequentially from there. For now just use process::unique_id
+    use crate::proc::process;
+    let n_start = process::unique_id(); // Modulo 64 soon
+    for i in 0..64 {
+        let n = ((n_start + i) % 64) as usize;
+
+        if table[n * 8 + 1].is_unused() {
+            // Found an empty slot:
+            //  [n * 8] -> Empty (guard)
+            //  [n * 8 + 1] -> User stack
+            //      ...
+            //  [n * 8 + 7] -> User stack
+
+            for j in 1..8 {
+                // Allocate user stack frames
+                let entry = &mut table[n * 8 + j];
+
+                let frame = memory_info.frame_allocator.allocate_frame()
+                    .ok_or("Failed to allocate frame")?;
+
+                entry.set_addr(frame.start_address(),
+                               PageTableFlags::PRESENT |
+                               PageTableFlags::WRITABLE |
+                               PageTableFlags::USER_ACCESSIBLE);
+            }
+
+            // Return the virtual addresses of the top of the kernel and user stacks
+            let slot_address: u64 = ((THREAD_STACK_PAGE_INDEX[0] as u64) << 39) +
+                ((THREAD_STACK_PAGE_INDEX[1] as u64) << 30) +
+                ((THREAD_STACK_PAGE_INDEX[2] as u64) << 21) +
+                (((n * 8) as u64) << 12);
+
+            return Ok((slot_address + 4096, slot_address + 8 * 4096)); // User stack
+        }
+    }
+
+    Err("All thread stack slots full")
+}
+
+
 fn create_pagetable() -> (*mut PageTable,u64) {
     let mem_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
@@ -217,7 +291,7 @@ pub fn allocate_pages_mapper(frame_allocator: &mut impl FrameAllocator<Size4KiB>
     let pages = {
         let end_addr = start_addr + size - 1u64;
         let start_page = Page::containing_address(start_addr);
-        let end_page = Page::containing_address(end_addr);
+        let end_page = Page::containing_address(end_addr); 
         Page::range_inclusive(start_page, end_page)
     };
 

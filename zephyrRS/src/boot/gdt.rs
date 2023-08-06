@@ -9,6 +9,8 @@ pub const PAGE_FAULT_IST_INDEX: u16 = 0;
 pub const GENERAL_PROTECTION_FAULT_IST_INDEX: u16 = 0;
 pub const TIMER_INTERRUPT_INDEX: u16 = 1;
 pub const KEYBOARD_INTERRUPT_INDEX: u16 = 0;
+pub const SYSCALL_TEMP_INDEX: u16 = 2;
+
 
 // lazy initialise the TSS
 lazy_static! {
@@ -38,6 +40,11 @@ lazy_static! {
     };
 }
 
+pub fn tss_addr() -> u64 {
+    let tss_ptr = &*TSS.lock() as *const TaskStateSegment;
+    tss_ptr as u64
+
+}
 
 unsafe fn tss_ref() -> &'static TaskStateSegment {
     let tss_ptr = &*TSS.lock() as *const TaskStateSegment;

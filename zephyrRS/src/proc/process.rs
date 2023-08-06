@@ -4,12 +4,13 @@ use x86_64::structures::paging::PageTableFlags;
 use spin::RwLock;
 use lazy_static::lazy_static;
 extern crate alloc;
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec, sync::Arc};
 use core::arch::asm;
 use crate::{println, serial_println};
 use crate::boot::interrupts::{Context, INTERRUPT_CONTEXT_SIZE};
 use crate::boot::gdt;
 use crate::mem::memory;
+use crate::syscall;
 use core::fmt;
 //use core::ptr;
 use object::{Object, ObjectSegment};
@@ -31,16 +32,27 @@ lazy_static! {
         RwLock::new(VecDeque::new());
 
     static ref CURR_THREAD: RwLock<Option<Box<Thread>>> = RwLock::new(None);
+    static ref COUNTER: RwLock<u64> = RwLock::new(0);
 }
 
+pub fn unique_id() -> u64 {
+    interrupts::without_interrupts(|| {
+        let mut counter = COUNTER.write();
+        *counter += 1;
+        *counter
+    })
+}
+
+struct Process {}
 
 struct Thread {
     /// Thread ID
-    thread_id: usize,
+    thread_id: u64,
+    process: Arc<Process>,
     kernel_stack: Vec<u8>,
     kernel_stack_end: u64,
     context: u64,
-    user_stack: Vec<u8>,
+    user_stack_end: u64,
     page_table_phys: u64, // pointer to each threads user stack
 }
 
@@ -49,8 +61,8 @@ struct Thread {
 impl fmt::Display for Thread {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let context = unsafe {&mut *(self.context as *mut Context)};
-        let kernel_stack_start = VirtAddr::from_ptr(self.kernel_stack.as_ptr()).as_u64();
-        let user_stack_start = VirtAddr::from_ptr(self.user_stack.as_ptr()).as_u64();
+        let kernel_stack_start = self.kernel_stack_end - (KERNEL_STACK_SIZE as u64);
+        let user_stack_start = self.user_stack_end - (USER_STACK_SIZE as u64);
         let contextRip = context.rip;
         let contextRsp = context.rsp;
 
@@ -59,28 +71,33 @@ thread_id: {}, rip: {:#016X}
     Kernel stack: {:#016X} - {:#016X} Context: {:#016X}
     Thread stack: {:#016X} - {:#016X} RSP: {:#016X}",
                self.thread_id, contextRip,
-               kernel_stack_start,
-               kernel_stack_start + (KERNEL_STACK_SIZE as u64),
+
+               kernel_stack_start, self.kernel_stack_end,
+
                self.context,
-               user_stack_start,
-               user_stack_start + (USER_STACK_SIZE as u64),
+               
+               user_stack_start, self.user_stack_end,
+               
                contextRsp)
     }
 }
 
 // create a kernel thread within the kernel stack space
-pub fn spawn_kernel_thread(function: fn()->()) -> usize {
+pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
     let  new_thread = {
-        let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
+        let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE + USER_STACK_SIZE);
         let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
         let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
+        let user_stack_end = kernel_stack_end + (USER_STACK_SIZE as u64);
+
 
         Box::new(Thread {
-            thread_id: 0,
+            thread_id: unique_id(),
+            process: Arc::new(Process{}),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
-            user_stack: Vec::with_capacity(USER_STACK_SIZE),
+            user_stack_end,
             page_table_phys: 0,
         })
     };
@@ -97,7 +114,7 @@ pub fn spawn_kernel_thread(function: fn()->()) -> usize {
     }
 
     context.cs = 8;
-    context.rsp = (VirtAddr::from_ptr(new_thread.user_stack.as_ptr()) + USER_STACK_SIZE).as_u64() as usize;
+    context.rsp = new_thread.user_stack_end as usize;
 
     let thread_id = new_thread.thread_id;
 
@@ -134,43 +151,50 @@ fn with_pagetable<F, R>(page_table_physaddr: u64, func: F) -> R where
 
     result
 }
-pub fn spawn_user_thread(bin: &[u8]) -> Result<usize, &'static str> {
+
+pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
     // https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
     // Check the header
-    const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+    const MAGIC_BYTES: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
-    if bin[0..4] != ELF_MAGIC {
-        return Err("Expected ELF binary");
+    if bin[0..4] != MAGIC_BYTES {
+        return Err("ELF FILE NOT FOUND");
     }
-    // Use the object crate to parse the ELF file
-    // https://crates.io/crates/object
     if let Ok(obj) = object::File::parse(bin) {
 
         // Create a user pagetable with only kernel pages
         let (user_page_table_ptr, user_page_table_physaddr) =
             memory::create_kernel_only_pagetable();
 
-        // No interrupts while using new page table
-        return interrupts::without_interrupts(|| {
-            memory::switch_to_pagetable(user_page_table_physaddr);
+        
+        return with_pagetable(user_page_table_physaddr, || {
 
             let entry_point = obj.entry();
-            println!("Entry point: {:#016X}", entry_point);
 
             for segment in obj.segments() {
                 let segment_address = segment.address() as u64;
 
-                println!("Section {:?} : {:#016X}", segment.name(), segment_address);
 
                 if let Ok(data) = segment.data() {
-                    println!("  len : {}", data.len());
 
-                    memory::allocate_pages(user_page_table_ptr,
-                                           VirtAddr::new(segment_address), // Start address
-                                           data.len() as u64, // Size (bytes)
-                                           PageTableFlags::PRESENT |
-                                           PageTableFlags::WRITABLE |
-                                           PageTableFlags::USER_ACCESSIBLE);
+                    let start_address = VirtAddr::new(segment_address);
+                    let end_address = start_address + data.len() as u64;
+
+                    // Check if data is in allowed range
+                    if (start_address < VirtAddr::new(USER_CODE_START))
+                        || (end_address >= VirtAddr::new(USER_CODE_END)) {
+                            return Err("ELF segment outside allowed range");
+                        }
+
+                    // Allocate memory in the pagetable
+                    if memory::allocate_pages(user_page_table_ptr,
+                                              start_address,
+                                              data.len() as u64, // Size (bytes)
+                                              PageTableFlags::PRESENT |
+                                              PageTableFlags::WRITABLE |
+                                              PageTableFlags::USER_ACCESSIBLE).is_err() {
+                        return Err("Could not allocate memory");
+                    }
 
                     // Copy data
                     let dest_ptr = segment_address as *mut u8;
@@ -190,17 +214,22 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<usize, &'static str> {
                 let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
                 let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
                 let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
+                
+                let (_user_stack_start, user_stack_end) = memory::allocate_user_stack(user_page_table_ptr)?;
 
                 Box::new(Thread {
-                    thread_id: 0,
+                    thread_id: unique_id(),
+                    // Create a new process
+                    process: Arc::new(Process {  }),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
                     kernel_stack_end,
+                    user_stack_end,
                     // Push a Context struct on the kernel stack
                     context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
                     // User stack needs new pages, not allocated on the kernel heap
-                    user_stack: Vec::new()
+                    
                 })
             };
 
@@ -216,25 +245,16 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<usize, &'static str> {
             context.cs = code_selector.0 as usize; // Code segment flags
             context.ss = data_selector.0 as usize; // Without this we get a GPF
 
-            // Allocate pages for the user stack
-            const USER_STACK_START: u64 = 0x5200000;
-
-            memory::allocate_pages(user_page_table_ptr,
-                                   VirtAddr::new(USER_STACK_START), // Start address
-                                   USER_STACK_SIZE as u64, // Size (bytes)
-                                   PageTableFlags::PRESENT |
-                                   PageTableFlags::WRITABLE |
-                                   PageTableFlags::USER_ACCESSIBLE);
-
-            // Note: Need to point to the end of the allocated region
-            //       because the stack moves down in memory
-            context.rsp = (USER_STACK_START as usize) + USER_STACK_SIZE;
+            
+            context.rsp = new_thread.user_stack_end as usize;
 
             let tid = new_thread.thread_id;
 
             println!("New Thread {}", new_thread);
-
-            RUNNING.write().push_back(new_thread);
+            // No interrupts while modifying queue
+            interrupts::without_interrupts(|| {
+                RUNNING.write().push_back(new_thread);
+            });
 
             return Ok(tid);
         });
@@ -242,32 +262,119 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<usize, &'static str> {
     return Err("Could not parse ELF");
 }
 
-// called each tick in timer_interrupt_handler
-pub fn schedule_next(context: &Context) -> usize {
-    let mut running = RUNNING.write();
-    let mut curr_thread = CURR_THREAD.write();
+pub fn fork_current_thread(current_context: &mut Context) {
 
-    if let Some(thread) = curr_thread.take() {
-        let mut proc_mut = thread;
+    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
 
-        proc_mut.context = (context as *const Context) as u64;
+        // Allocate user stack
+        let page_table_ptr = memory::active_pagetable_ptr();
+        if let Ok((_user_stack_start, user_stack_end)) = memory::allocate_user_stack(page_table_ptr) {
+            let new_thread = {
+                // Create a new kernel stack
+                let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
+                let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
+                let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
 
-        // add current thread to the back of the queue after storing it's context
-        running.push_back(proc_mut);
+                Box::new(Thread {
+                    thread_id: unique_id(),
+                    process: current_thread.process.clone(), // Shared state
+                    page_table_phys: current_thread.page_table_phys, // Shared page table
+                    kernel_stack,
+                    kernel_stack_end,
+                    user_stack_end,
+                    context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
+                })
+            };
+
+            let new_context = unsafe {&mut *(new_thread.context as *mut Context)};
+            *new_context = current_context.clone();
+
+            // Set new stack pointer
+            new_context.rsp = new_thread.user_stack_end as usize;
+
+            // Set return values in rax
+            new_context.rax = 0; // No error
+            new_context.rdi = 0; // Indicates that this is the new thread
+            current_context.rax = 0; // No error
+            current_context.rdi = new_thread.thread_id as usize;
+
+            let _tid = new_thread.thread_id;
+            RUNNING.write().push_back(new_thread);
+        } else {
+            // Failed to allocate user stack
+            current_context.rax = syscall::SYSCALL_ERROR_MEMALLOC; // Error code
+        }
+    } else {
+        // Somehow no current thread
+        current_context.rax = 2; // Error code
     }
-    *curr_thread= running.pop_front();
+}
 
-    match curr_thread.as_ref() {
+pub fn exit_current_thread(_current_context: &mut Context) {
+    // Remove current thread
+    {
+        let mut current_thread = CURR_THREAD.write();
+
+        if let Some(_thread) = current_thread.take() {
+            // Free user stack pages
+
+            // If this is the last thread in this process, free shared
+            // memory and page tables
+
+            // Drop thread, free kernel stack
+        }
+    }
+    // Can't return from this syscall, so this thread now waits for a
+    // timer interrupt to switch context.
+    unsafe {
+        asm!("sti",
+             "2:",
+             "hlt",
+             "jmp 2b");
+    }
+}
+pub fn schedule_next(context: &Context) -> usize {
+
+    let mut running_queue = RUNNING.write();
+    let mut current_thread = CURR_THREAD.write();
+
+    if let Some(thread) = current_thread.take() {
+        // Put the current thread to the back of the queue
+
+        // Update the stack pointer
+        let mut thread_mut = thread;
+
+        // Store context location. This should almost always be in the same
+        // location on the kernel stack. The exception is the
+        // first time a context switch occurs from the original kernel
+        // stack to the first kernel thread stack.
+        thread_mut.context = (context as *const Context) as u64;
+
+        // Save the page table. This is to enable context
+        // switching during functions which manipulate page tables
+        // for example new_user_thread
+        thread_mut.page_table_phys = memory::active_pagetable_physaddr();
+
+        running_queue.push_back(thread_mut);
+    } 
+    *current_thread = running_queue.pop_front();
+
+    match current_thread.as_ref() {
         Some(thread) => {
-
+            // Set the kernel stack for the next interrupt
             gdt::set_interrupt_stack_table(
                 gdt::TIMER_INTERRUPT_INDEX as usize,
-
+                // Note: Point to the end of the stack
                 VirtAddr::new(thread.kernel_stack_end));
-            
-            if thread.page_table_phys != 0 { // not kernel 
+
+            if thread.page_table_phys != 0 {
+                // Change page table
+                // Note: zero for kernel thread
                 memory::switch_to_pagetable(thread.page_table_phys);
             }
+
+            // Point the stack to the new context
+            // (which is usually stored on the kernel stack)
             thread.context as usize
         },
         None => 0
