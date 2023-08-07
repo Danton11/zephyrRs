@@ -114,6 +114,23 @@ pub fn active_pagetable_ptr() -> *mut PageTable {
     let virt = memory_info.phys_memory_offset + active_pagetable_physaddr();
     virt.as_mut_ptr()
 }
+
+
+
+//-----------
+
+
+//find the first bit to set to 1 in a bitmap
+fn first_bit_location(bitmap: u32) -> u32 {
+    let i: u32;
+    unsafe {
+        asm!("bsf eax, ecx",
+             in("ecx") bitmap,
+             lateout("eax") i,
+             options(pure, nomem, nostack));
+    }
+    i
+}
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,

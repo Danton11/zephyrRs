@@ -14,7 +14,7 @@ struct Writer {}
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         unsafe {
-            asm!("mov rax, 2", // syscall function
+            asm!("mov rax, 2", // syscall  write function
                  "syscall",
                  in("rdi") s.as_ptr(), // First argument
                  in("rsi") s.len()); // Second argument

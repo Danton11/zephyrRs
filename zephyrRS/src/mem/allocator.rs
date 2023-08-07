@@ -1,14 +1,20 @@
 use crate::{println, serial_println};
-use fixed_size_block::FixedSizeBlockAllocator;
+//use fixed_size_block::FixedSizeBlockAllocator;
+use crate::mem::allocator::bump::BumpAllocator;
+use crate::mem::allocator::linked_list::LinkedListAllocator;
 use linked_list_allocator::LockedHeap;
 use x86_64::{structures::paging::{mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,},VirtAddr,};
+
+use self::fixed_size_block::FixedSizeBlockAllocator;
 
 
 
 
 pub const HEAP_START: usize = 0x4444_4444_0000;
-pub const HEAP_SIZE: usize = 200 * 1024;
+pub const HEAP_SIZE: usize = 300 * 1024;
 
+pub mod bump;
+pub mod linked_list;
 pub mod fixed_size_block;
 
 #[global_allocator]
@@ -54,6 +60,6 @@ impl<A> Locked<A> {
     }
 }
 
-//fn align_up(addr: usize, align: usize) -> usize {
-//    (addr + align - 1) & !(align - 1)
-//}
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
