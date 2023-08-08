@@ -12,6 +12,7 @@ use crate::boot::gdt;
 use crate::mem::memory;
 use crate::syscall;
 use core::fmt;
+
 //use core::ptr;
 use object::{Object, ObjectSegment};
 
@@ -25,7 +26,8 @@ const USER_CODE_START: u64 = 0x5000000;
 /// Exclusive upper limit for user code
 const USER_CODE_END: u64 = 0x80000000;
 
-
+const USER_HEAP_START: u64 = 0x280_0060_0000;
+const USER_HEAP_SIZE: u64 = 4 * 1024 * 1024;
 lazy_static! {
     // queue that contains moveable boxes of Threads
     static ref RUNNING: RwLock<VecDeque<Box<Thread>>> =
@@ -43,8 +45,15 @@ pub fn unique_id() -> u64 {
     })
 }
 
-struct Process {}
+struct Process {
+    page_table_physaddr: u64
+}
 
+#[derive(Debug, Copy, Clone)]
+enum ThreadType {
+    Kernel,
+    User,
+}
 struct Thread {
     /// Thread ID
     thread_id: u64,
@@ -54,9 +63,39 @@ struct Thread {
     context: u64,
     user_stack_end: u64,
     page_table_phys: u64, // pointer to each threads user stack
+    thread_type: ThreadType,
 }
 
 
+
+impl Thread {
+    pub fn print_details(&self) {
+        let context = unsafe {&mut *(self.context as *mut Context)};
+        let kernel_stack_start = self.kernel_stack_end - (KERNEL_STACK_SIZE as u64);
+        let user_stack_start = self.user_stack_end - (USER_STACK_SIZE as u64);
+        let contextRip = context.rip;
+        let contextRsp = context.rsp;
+
+        serial_println!("---------------- Thread Details ----------------");
+        serial_println!("Thread ID:              {}", self.thread_id);
+        serial_println!("Thread Type:            {:?}", self.thread_type);
+        serial_println!("RIP:                    {:#016X}", contextRip);
+        serial_println!("Kernel Stack ({} bytes): {:#016X} - {:#016X}", KERNEL_STACK_SIZE, kernel_stack_start, self.kernel_stack_end);
+        serial_println!("Context Address:        {:#016X}", self.context);
+        serial_println!("Thread Stack ({} bytes): {:#016X} - {:#016X}", USER_STACK_SIZE, user_stack_start, self.user_stack_end);
+        serial_println!("RSP:                    {:#016X}", contextRsp);
+        serial_println!("-----------------------------------------------");
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        if self.page_table_physaddr == memory::active_pagetable_physaddr() {
+            memory::switch_to_kernel_pagetable();
+        }
+        memory::free_user_pagetables(self.page_table_physaddr);
+    }
+}
 // Allow thread details to outputted to screen
 impl fmt::Display for Thread {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -67,9 +106,23 @@ impl fmt::Display for Thread {
         let contextRsp = context.rsp;
 
         write!(f, "\
-thread_id: {}, rip: {:#016X}
-    Kernel stack: {:#016X} - {:#016X} Context: {:#016X}
-    Thread stack: {:#016X} - {:#016X} RSP: {:#016X}",
+===========================================
+Thread ID: {}
+===========================================
+Kernel Stack:
+    Start: {:#016X}
+    End:   {:#016X}
+    Context Address: {:#016X}
+-------------------------------------------
+User Stack:
+    Start: {:#016X}
+    End:   {:#016X}
+    RSP:   {:#016X}
+-------------------------------------------
+Execution:
+    RIP: {:#016X}
+===========================================
+",
                self.thread_id, contextRip,
 
                kernel_stack_start, self.kernel_stack_end,
@@ -93,12 +146,13 @@ pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
 
         Box::new(Thread {
             thread_id: unique_id(),
-            process: Arc::new(Process{}),
+            process: Arc::new(Process{page_table_physaddr: 0 }),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
             user_stack_end,
             page_table_phys: 0,
+            thread_type: ThreadType::Kernel,
         })
     };
 
@@ -117,8 +171,8 @@ pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
     context.rsp = new_thread.user_stack_end as usize;
 
     let thread_id = new_thread.thread_id;
-
-    println!("New kernel thread {}", new_thread);
+    new_thread.print_details();
+    //println!("New kernel thread {}", new_thread);
 
     // Turn off interrupts while modifying thread table
     interrupts::without_interrupts(|| {
@@ -166,7 +220,13 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
         let (user_page_table_ptr, user_page_table_physaddr) =
             memory::create_kernel_only_pagetable();
 
-        
+        // Allocate user heap
+        memory::create_user_ondemand_pages(
+            user_page_table_ptr,
+            VirtAddr::new(USER_HEAP_START),
+            USER_HEAP_SIZE); 
+
+
         return with_pagetable(user_page_table_physaddr, || {
 
             let entry_point = obj.entry();
@@ -220,7 +280,7 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
                 Box::new(Thread {
                     thread_id: unique_id(),
                     // Create a new process
-                    process: Arc::new(Process {  }),
+                    process: Arc::new(Process {page_table_physaddr: user_page_table_physaddr}),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
@@ -229,6 +289,7 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
                     // Push a Context struct on the kernel stack
                     context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
                     // User stack needs new pages, not allocated on the kernel heap
+                    thread_type: ThreadType::User,
                     
                 })
             };
@@ -247,10 +308,12 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
 
             
             context.rsp = new_thread.user_stack_end as usize;
-
+            context.rax = USER_HEAP_START as usize;
+            context.rcx = USER_HEAP_SIZE as usize;
+            
             let tid = new_thread.thread_id;
+            new_thread.print_details();
 
-            println!("New Thread {}", new_thread);
             // No interrupts while modifying queue
             interrupts::without_interrupts(|| {
                 RUNNING.write().push_back(new_thread);
@@ -283,6 +346,7 @@ pub fn fork_current_thread(current_context: &mut Context) {
                     kernel_stack_end,
                     user_stack_end,
                     context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
+                    thread_type: current_thread.thread_type,
                 })
             };
 
