@@ -2,7 +2,9 @@ use crate::{println, serial_println};
 use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
 use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive, PageSize, page_table::PageTableEntry,},PhysAddr, VirtAddr,};
 use crate::mem::allocator;
-use alloc::vec;
+use alloc::{vec, borrow::ToOwned};
+use alloc::string::String;
+use core::fmt;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PageTableFlags;
 use core::arch::asm;
@@ -25,15 +27,33 @@ static mut MEMORY_INFO: Option<MemoryInfo> = None;
 pub fn init(boot_info: &'static BootInfo) {
         interrupts::without_interrupts(|| {
         let mut memory_size = 0;
+
+
+
+        println!("-------------------------------Memory Layout ----------------");
+        println!("{:<20} {:<20} {:<20} {:<15}", "Region Type", "Start Address", "End Address", "Size");
+        println!("-----------------------------------------------");
+        serial_println!("-----------------------------------------Memory Layout --------------------------------------");
+        serial_println!("{:<20} {:<20} {:<20} {:<15}", "Region Type", "Start Address", "End Address", "Size (bytes) ");
+        serial_println!("---------------------------------------------------------------------------------------------");
+
         for region in boot_info.memory_map.iter() {
             let start_addr = region.range.start_addr();
             let end_addr = region.range.end_addr();
-            memory_size += end_addr - start_addr;
-            println!("{:?} - [{:#016X}-{:#016X}]\n",region.region_type, start_addr, end_addr);
-            serial_println!("{:?} - [{:#016X}-{:#016X}]\n",region.region_type, start_addr, end_addr);
+            let region_size = end_addr - start_addr;
+            memory_size += region_size;
+
+            println!("{:<20?} {:<#20X} {:<#20X} {:<15}", region.region_type, start_addr, end_addr, region_size);
+            serial_println!("{:<20?}                {:<#20X} {:<#20X} {:<15}", region.region_type, start_addr, end_addr, region_size);
         }
-        println!("Memory size: {} Bytes\n", memory_size);
-        serial_println!("Memory size: {} Bytes\n", memory_size);
+
+        println!("-----------------------------------------------");
+        println!("Total Memory Size: {}", memory_size);
+        println!("-----------------------------------------------");
+        serial_println!("-------------------------------------------------------------------------------");
+        serial_println!("Total Memory Size: {}", memory_size);
+        serial_println!("-------------------------------------------------------------------------------");
+
 
         let phys_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
 
@@ -55,6 +75,28 @@ pub fn init(boot_info: &'static BootInfo) {
         }) };
     });
 }
+
+
+fn region_type_to_str(region_type: &MemoryRegionType) -> &'static str {
+    match *region_type {
+        MemoryRegionType::Usable => "Usable",
+        MemoryRegionType::Reserved => "Reserved",
+        MemoryRegionType::FrameZero => "FrameZero",
+        MemoryRegionType::PageTable => "FrameZero",
+        MemoryRegionType::Kernel => "FrameZero",
+        MemoryRegionType::KernelStack => "FrameZero",
+        MemoryRegionType::BootInfo => "FrameZero",
+        MemoryRegionType::Bootloader => "FrameZero",
+        // ... add other variants here ...
+        _ => "Unknown",
+    }
+}
+
+fn format_region_type(region_type: String, width: usize) -> String {
+    let padding = width.saturating_sub(region_type.len());
+    region_type.to_owned() + &" ".repeat(padding.to_owned())
+}
+
 
 ///- `active_level_4_table`: This function returns a mutable reference to the level 4 page table currently active in the CPU. It reads the value from the CR3 register (which contains the physical address of the active level 4 table) and converts it to the equivalent virtual address using the provided `physical_memory_offset`.
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
@@ -122,17 +164,6 @@ pub fn active_pagetable_ptr() -> *mut PageTable {
 //-----------
 
 
-//find the first bit to set to 1 in a bitmap
-fn first_bit_location(bitmap: u32) -> u32 {
-    let i: u32;
-    unsafe {
-        asm!("bsf eax, ecx",
-             in("ecx") bitmap,
-             lateout("eax") i,
-             options(pure, nomem, nostack));
-    }
-    i
-}
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct PageFrameAllocator {
     memory_map: &'static MemoryMap,
@@ -287,7 +318,7 @@ pub fn free_user_pagetables(level_4_physaddr: u64) {
             if !entry.is_unused() {
                 if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
                     // Maps a frame, not a page table
-                    if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+                    if entry.flags().contains(PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE) {
                         // A user frame => deallocate
                         frame_allocator.deallocate_frame(
                             entry.frame().unwrap());
@@ -311,6 +342,55 @@ pub fn free_user_pagetables(level_4_physaddr: u64) {
                    PhysAddr::new(level_4_physaddr),
                    4);
 }
+
+
+
+pub fn create_user_ondemand_pages(
+    level_4_table_ptr: *mut PageTable,
+    start_addr: VirtAddr,
+    size: u64)
+    -> Result<(), MapToError<Size4KiB>> {
+
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let frame_allocator = &mut memory_info.frame_allocator;
+
+    let l4_table: &mut PageTable = unsafe {
+                &mut *level_4_table_ptr};
+
+    let mut mapper = unsafe {
+        OffsetPageTable::new(l4_table,
+                             memory_info.phys_memory_offset)};
+
+    let page_range = {
+        let end_addr = start_addr + size - 1u64;
+        let start_page = Page::containing_address(start_addr);
+        let end_page = Page::containing_address(end_addr);
+        Page::range_inclusive(start_page, end_page)
+    };
+
+    for page in page_range {
+        let frame = frame_allocator
+            .allocate_frame()
+            .ok_or(MapToError::FrameAllocationFailed)?;
+
+        // Map the frame to the current page
+        unsafe {
+            mapper.map_to_with_table_flags(
+                page,
+                frame,
+                PageTableFlags::PRESENT |
+                PageTableFlags::WRITABLE |
+                PageTableFlags::USER_ACCESSIBLE,
+                PageTableFlags::PRESENT |
+                PageTableFlags::WRITABLE |
+                PageTableFlags::USER_ACCESSIBLE,
+                frame_allocator)?.flush()
+        };
+    }
+
+    Ok(())
+}
+
 pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), &'static str> {
   
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};

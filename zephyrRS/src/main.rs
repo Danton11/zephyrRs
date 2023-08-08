@@ -18,7 +18,7 @@ entry_point!(kernel_main);
 
 fn kernel_thread_main() {
 
-    println!("Starting kernel thread!");
+    let _ = process::spawn_user_thread(include_bytes!("../user/hello"));
     let _ = process::spawn_user_thread(include_bytes!("../user/hello"));
     //process::spawn_user_thread(include_bytes!("../user/hello"));
 
