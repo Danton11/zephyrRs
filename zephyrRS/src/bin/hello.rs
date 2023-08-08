@@ -101,7 +101,7 @@ fn thread_spawn(func: extern "C" fn() -> ()) -> Result<u64, u64> {
 extern "C" fn test() {
     println!("Hello from thread (2)!");
 
-    for i in 1..10 {
+    for i in 1..11 {
         println!("Thread (2): {}", i);
         for _ in 1..10000000 {
             unsafe { asm!("nop");}
@@ -115,7 +115,7 @@ pub unsafe extern "sysv64" fn _start() -> ! {
 
     let _tid = thread_spawn(test).unwrap();
 
-    for i in 1..10 {
+    for i in 1..11 {
         println!("Thread (1): {}",  i);
         for _ in 1..10000000{
             unsafe { asm!("nop");}
