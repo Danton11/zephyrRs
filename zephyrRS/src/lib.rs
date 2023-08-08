@@ -6,15 +6,19 @@
 #![allow(non_snake_case)]
 #![feature(abi_x86_interrupt)]
 #![feature(const_mut_refs)]
+#![feature(naked_functions)]
+#![feature(asm_const)]
+#![allow(unused_imports)]
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use bootloader::BootInfo;
+//use bootloader::BootInfo;
 
 pub mod boot;
 pub mod dev;
 pub mod mem;
 pub mod proc;
+pub mod syscall;
 
 use dev::vga_buffer;
 
@@ -24,7 +28,6 @@ pub fn init() {
     boot::interrupts::init_idt();
     unsafe { boot::interrupts::PICS.lock().initialize() }; // initialise PIC ( hardware interrupts)
     x86_64::instructions::interrupts::enable(); // allow interrupts to reach CPU
-    //mem::memory::init_mem(boot_info);
 }
 
 pub trait Testable {
