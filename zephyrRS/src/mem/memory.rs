@@ -1,7 +1,8 @@
 use crate::{println, serial_println};
 use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
-use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive,},PhysAddr, VirtAddr,};
+use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive, PageSize, page_table::PageTableEntry,},PhysAddr, VirtAddr,};
 use crate::mem::allocator;
+use alloc::vec;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PageTableFlags;
 use core::arch::asm;
@@ -12,7 +13,7 @@ const THREAD_STACK_PAGE_INDEX: [u8;3] = [5,0,0];
 struct MemoryInfo {
     boot_info: &'static BootInfo,
     phys_memory_offset: VirtAddr,
-    frame_allocator: BootInfoFrameAllocator,
+    frame_allocator: PageFrameAllocator,
     kernel_page_tables: &'static mut PageTable
 }
 
@@ -39,10 +40,11 @@ pub fn init(boot_info: &'static BootInfo) {
         let level_4_table = unsafe {active_level_4_table(phys_memory_offset)};
 
         let mut mapper = unsafe {OffsetPageTable::new(level_4_table, phys_memory_offset)};
-        let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map)  };
+        let mut frame_allocator = unsafe { PageFrameAllocator::init(&boot_info.memory_map, phys_memory_offset)  };
 
 
         allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
 
         // Store boot_info for later calls
         unsafe { MEMORY_INFO = Some(MemoryInfo {
@@ -132,31 +134,43 @@ fn first_bit_location(bitmap: u32) -> u32 {
     i
 }
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
-pub struct BootInfoFrameAllocator {
+pub struct PageFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize, 
-    frame_usage: [bool; 2000],
+    frame_usage: [bool;  100000],
+    phys_memory_offset: VirtAddr,
 }
 
 ///- `BootInfoFrameAllocator`: This frame allocator uses the memory map provided by the bootloader to track which frames are available for allocation. It filters out all memory regions that are marked as `USABLE` and provides an iterator over all usable frames. Each time a frame is allocated, it increments the `next` index to keep track of the next frame to allocate.
 
-impl BootInfoFrameAllocator {
+
+impl PageFrameAllocator {
     ///- `init`: This method initializes the `BootInfoFrameAllocator`. It is marked as `unsafe` because the caller must ensure that the provided memory map is correct.
     /// Create a FrameAllocator from the passed memory map.
     ///
     /// This function is unsafe because the caller must guarantee that the passed
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_map: &'static MemoryMap, phys_memory_offset: VirtAddr ) -> Self {
         let _frame_count = memory_map.iter().count();
         //println!("num of entries: {}", frame_count);
-        BootInfoFrameAllocator {
+        PageFrameAllocator {
             memory_map,
             next: 0,
-            frame_usage: [false; 2000],
+            frame_usage: [false; 100000],
+            phys_memory_offset
         }
     }
-
+    pub fn total_frames(&self) -> usize {
+    // get usable regions from memory map
+    let regions = self.memory_map.iter();
+    let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+    // sum up the size of each region and divide by the size of a frame to get the number of frames
+    let total_frames: usize = usable_regions
+        .map(|r| (r.range.end_addr() - r.range.start_addr()) as usize / 4096)
+        .sum();
+    total_frames
+}
     /// Returns the total size of usable memory.
 
     pub fn total_usable_size(&self) -> u64 {
@@ -171,6 +185,9 @@ impl BootInfoFrameAllocator {
         let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
         self.frame_usage[frame_num] = true; // mark frame as used
     }
+
+
+
 
     fn is_frame_free(&self, frame: PhysFrame) -> bool {
         let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
@@ -190,10 +207,37 @@ impl BootInfoFrameAllocator {
         // create `PhysFrame` types from the start addresses
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
+
+    fn deallocate_frame(&mut self, frame: PhysFrame) {
+        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+        self.frame_usage[frame_num] = false; // mark frame as free
+
+        // zero out the frame
+        let size = 4096; // size of a page/frame
+        let addr = frame.start_address().as_u64();
+        let virt_addr = self.translate_addr_phys_to_virt(addr);
+
+        // convert the virtual address to a raw pointer
+        let ptr: *mut u8 = virt_addr.as_mut_ptr();
+        unsafe {
+            core::ptr::write_bytes(ptr, 0, size);
+        }
+    }
+
+    // method to translate a physical address to a virtual one
+    fn translate_addr_phys_to_virt(&self, addr: u64) -> VirtAddr {
+        self.phys_memory_offset + addr
+    }
+
+    // method to translate a virtual address to a physical one
+    fn translate_addr_virt_to_phys(&self, addr: VirtAddr) -> u64 {
+        addr.as_u64() - self.phys_memory_offset.as_u64()
+    }
+    
 }
 
 ///- `allocate_frame`: This method allocates a new frame of memory by returning the next usable frame from the memory map. After each allocation, it increments the `next` index to point to the next usable frame.
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+unsafe impl FrameAllocator<Size4KiB> for PageFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let frame = self.usable_frames().nth(self.next);
         match frame {
@@ -208,8 +252,13 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             },
         }
     }
+   }
+pub fn switch_to_kernel_pagetable() {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let phys_addr = (memory_info.kernel_page_tables as *mut PageTable as u64)
+        - memory_info.phys_memory_offset.as_u64();
+    switch_to_pagetable(phys_addr);
 }
-
 pub fn switch_to_pagetable(phys_addr: u64) {
     unsafe {
         asm!("mov cr3, {addr}",
@@ -224,7 +273,44 @@ pub fn active_pagetable_physaddr() -> u64 {
     }
     physaddr
 }
+pub fn free_user_pagetables(level_4_physaddr: u64) {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
+    fn free_pages_rec(physical_memory_offset: VirtAddr,
+                      frame_allocator: &mut PageFrameAllocator,
+                      table_physaddr: PhysAddr,
+                      level: u16) {
+        let table = unsafe{&mut *(physical_memory_offset
+                                  + table_physaddr.as_u64())
+                           .as_mut_ptr() as &mut PageTable};
+        for entry in table.iter() {
+            if !entry.is_unused() {
+                if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                    // Maps a frame, not a page table
+                    if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+                        // A user frame => deallocate
+                        frame_allocator.deallocate_frame(
+                            entry.frame().unwrap());
+                    }
+                } else {
+                    // A page table
+                    free_pages_rec(physical_memory_offset,
+                                   frame_allocator,
+                                   entry.addr(),
+                                   level - 1);
+                }
+            }
+        }
+        // Free page table
+        frame_allocator.deallocate_frame(
+            PhysFrame::from_start_address(table_physaddr).unwrap());
+    }
+
+    free_pages_rec(memory_info.phys_memory_offset,
+                   &mut memory_info.frame_allocator,
+                   PhysAddr::new(level_4_physaddr),
+                   4);
+}
 pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), &'static str> {
   
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
@@ -355,4 +441,70 @@ pub fn deallocate_page(mapper: &mut impl Mapper<Size4KiB>,address:u64,size:usize
         }
     }
 }
+
+fn time_stamp_counter() -> u64 {
+    let counter: u64;
+    unsafe{
+        asm!("rdtsc",
+             "shl rdx, 32", // High bits in EDX
+             "or rdx, rax", // Low bits in EAX
+             out("rdx") counter,
+             out("rax") _, // Clobbers RAX
+             options(pure, nomem, nostack)
+        );
+    }
+    counter
+}
+
+pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let mut mapper = unsafe {OffsetPageTable::new(memory_info.kernel_page_tables, memory_info.phys_memory_offset)};
+
+    // Calculate the start and end page for the stack
+    let addr = stack_end.as_u64() - 8 * 4096;
+    let stack_start = VirtAddr::new(addr);
+    let start_page: Page<Size4KiB> = Page::containing_address(stack_start);
+    let end_page = Page::containing_address(stack_end);
+
+    // Iterate over all pages in the stack
+    for page in Page::range_inclusive(start_page, end_page) {
+        // Unmap the page
+        let (_frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap")?;
+
+        // Flush the TLB
+        flush.flush();
+    }
+
+    Ok(())
+}
+
+
+pub fn test_alloc_times() {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let mut alloc = &mut memory_info.frame_allocator;
+
+    const N: usize = 800;
+    let count1 = time_stamp_counter();
+
+    for _ in 0..10 {
+        // Allocate frames
+        let mut frames = vec![];
+        for _ in 0..N {
+            let frame = alloc.allocate_frame();
+            frames.push(frame);
+        }
+
+        // Free them all again
+        for opt_frame in frames {
+            if let Some(frame) = opt_frame {
+                alloc.deallocate_frame(frame);
+            }
+        }
+    }
+    let count2 = time_stamp_counter();
+    println!("Clock ticks: {} M", (count2 - count1) / 1000000);
+    serial_println!("Clock ticks: {} M", (count2 - count1) / 1000000);
+}
+
+
 

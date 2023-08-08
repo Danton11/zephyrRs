@@ -103,7 +103,7 @@ extern "C" fn test() {
 
     for i in 1..10 {
         println!("Thread (2): {}", i);
-        for _ in 1..100000000 {
+        for _ in 1..10000000 {
             unsafe { asm!("nop");}
         }
     }
@@ -117,10 +117,11 @@ pub unsafe extern "sysv64" fn _start() -> ! {
 
     for i in 1..10 {
         println!("Thread (1): {}",  i);
-        for _ in 1..100000000 {
+        for _ in 1..10000000{
             unsafe { asm!("nop");}
         }
     }
-
-    loop {}
+    asm!("mov rax, 1", // exit_current_thread syscall
+         "syscall");
+    loop{}
 }

@@ -43,7 +43,8 @@ pub fn unique_id() -> u64 {
     })
 }
 
-struct Process {}
+struct Process {
+    page_table_physaddr: u64}
 
 struct Thread {
     /// Thread ID
@@ -55,8 +56,15 @@ struct Thread {
     user_stack_end: u64,
     page_table_phys: u64, // pointer to each threads user stack
 }
-
-
+impl Drop for Process {
+    fn drop(&mut self) {
+        if self.page_table_physaddr == memory::active_pagetable_physaddr() {
+            memory::switch_to_kernel_pagetable();
+        }
+        serial_println!("dropping proc");
+        memory::free_user_pagetables(self.page_table_physaddr);
+    }
+}
 // Allow thread details to outputted to screen
 impl fmt::Display for Thread {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -93,7 +101,7 @@ pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
 
         Box::new(Thread {
             thread_id: unique_id(),
-            process: Arc::new(Process{}),
+            process: Arc::new(Process{page_table_physaddr: 0 }),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
@@ -220,7 +228,7 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
                 Box::new(Thread {
                     thread_id: unique_id(),
                     // Create a new process
-                    process: Arc::new(Process {  }),
+                    process: Arc::new(Process {page_table_physaddr: user_page_table_physaddr}),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
