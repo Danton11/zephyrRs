@@ -9,11 +9,13 @@ use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use kernel::mem::memory;
 use kernel::syscall;
+use kernel::dev::vga_buffer;
+use kernel::boot::interrupts;
 use kernel::{println, serial_println};
 use kernel::proc::process;
 
 extern crate alloc; 
-
+use alloc::vec::Vec;
 
 
 
@@ -21,7 +23,9 @@ entry_point!(kernel_main);
 
 fn kernel_thread_main() {
 
-    let _ = process::spawn_user_thread(include_bytes!("../../user/bin"));
+    let keyboard_listener = interrupts::keyboard_rendezvous();
+    let vga_listener = vga_buffer::start_listener();
+    let _ = process::spawn_user_thread(include_bytes!("../../user/bin"), [keyboard_listener, vga_listener].to_vec());
 //    let _ = process::spawn_user_thread(include_bytes!("../user/hello"));
     //process::spawn_user_thread(include_bytes!("../user/hello"));
 
@@ -48,7 +52,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    process::spawn_kernel_thread(kernel_thread_main);
+
+    process::spawn_kernel_thread(kernel_thread_main, Vec::new());
 
     kernel::hlt_loop();
 }

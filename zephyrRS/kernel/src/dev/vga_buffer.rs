@@ -2,7 +2,13 @@ use crate::println;
 use core::fmt;
 use lazy_static::lazy_static;
 use spin::Mutex;
+use core::arch::asm;
 use volatile::Volatile;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::RwLock;
+use crate::proc::process;
+use crate::sync::Rendezvous;
 ///Color Enum: The Color enum represents the 16 different colors available in VGA text mode.
 
 ///ColorCode Struct: The ColorCode struct is used to store color codes for text foreground and background. It's stored as a single u8, with the high 4 bits representing the background color and the low 4 bits representing the foreground color. It also includes an implementation block with a method for creating a new ColorCode.
@@ -291,4 +297,26 @@ fn test_println_output() {
             assert_eq!(char::from(screen_char.ascii_character), c);
         }
     });
+}
+
+pub fn start_listener() -> Arc<RwLock<Rendezvous>> {
+    let rend = Arc::new(RwLock::new(Rendezvous::Empty));
+    process::spawn_kernel_thread(listener, Vec::from([rend.clone()])); // kernel space
+    rend
+}
+fn listener() {
+    loop {
+        // Receive
+        let err: u64;
+        let value: u64;
+        unsafe {
+            asm!("mov rax, 3", // sys_receive
+                 "mov rdi, 0", // handle
+                 "syscall",
+                 lateout("rax") err,
+                 lateout("rdi") value)
+        }
+        let ch = char::from_u32(value as u32).unwrap();
+        println!("VGA: {} , {} => {}", err, value, ch);
+    }
 }

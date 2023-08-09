@@ -12,19 +12,19 @@ use crate::boot::gdt;
 use crate::mem::memory;
 use crate::syscall;
 use crate::sync::Rendezvous;
-use crate::sync::Message;
+use crate::sync::{Message,Data};
 use core::fmt;
 
 //use core::ptr;
 use object::{Object, ObjectSegment};
 
 /// Size of the kernel stack for each thread, in bytes
-const KERNEL_STACK_SIZE: usize = 4096 * 2;
+pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
 
 /// Size of the user stack for each user thread, in bytes
-const USER_STACK_SIZE: usize = 4096 * 5;
+pub const USER_STACK_SIZE: usize = 4096 * 5;
 /// Lowest address that user code can be loaded into
-const USER_CODE_START: u64 = 0x5000000;
+pub const USER_CODE_START: u64 = 0x5000000;
 /// Exclusive upper limit for user code
 const USER_CODE_END: u64 = 0x80000000;
 
@@ -49,7 +49,7 @@ pub fn unique_id() -> u64 {
 
 pub struct Process {
     page_table_physaddr: u64,
-    handles: Vec<Arc<RwLock<Rendezvous>>>
+    handles: Vec<Option<Arc<RwLock<Rendezvous>>>>
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -65,7 +65,7 @@ pub struct Thread {
 
     /// A reference to the parent process of the thread. This provides context for the
     /// thread's execution and access to shared resources with other threads of the same process.
-    process: Arc<Process>,
+    process: Arc<RwLock<Process>>,
 
     /// The memory region reserved for the thread's kernel stack. The kernel stack is used 
     /// for operations that occur in kernel mode, separate from the user stack.
@@ -102,7 +102,7 @@ impl Thread {
     pub fn get_thread_id(&self) -> u64 {
         self.thread_id
     }
-    pub fn get_process(&self) -> &Arc<Process> {
+    pub fn get_process(&self) -> &Arc<RwLock<Process>> {
         &self.process
     }
 
@@ -149,7 +149,31 @@ impl Thread {
     }
 
     pub fn get_handles(&self, id: u64) -> Option<Arc<RwLock<Rendezvous>>> {
-        self.process.handles.get(id as usize).map(|r| r.clone())    
+            self.process.read().handles.get(id as usize).unwrap_or(&None).as_ref().map(|rv| rv.clone()) // Option<Arc<>>
+    }
+
+    /// Take the rendezvous, leaving handle empty (None)
+    pub fn take_rendezvous(&self, id: u64)
+                           -> Option<Arc<RwLock<Rendezvous>>> {
+        self.process.write().handles.get_mut(id as usize).map_or(None, |elem| elem.take())
+    }
+
+    /// Add a rendezvous to the process, returning the handle
+    pub fn give_rendezvous(&self, rendezvous: Arc<RwLock<Rendezvous>>) -> u64 {
+        // Lock the handles
+        let handles = &mut self.process.write().handles;
+
+        // Find empty handle slot
+        for (pos, handle) in handles.iter().enumerate() {
+            if handle.is_none() {
+                // Found empty slot => Store rendezvous
+                handles[pos] = Some(rendezvous);
+                return pos as u64;
+            }
+        }
+        // All full => Add new handle
+        handles.push(Some(rendezvous));
+        (handles.len() - 1) as u64
     }
 
     fn context(&self) -> &Context {
@@ -172,9 +196,32 @@ impl Thread {
         let context = self.context_mut();
         context.rax = 0; // No error
         match message {
-            // sysret call takes the IP from RCX and RFLAGs from R11
-            Message::Short(value) => { context.rdi = value;}, // place message value in the rdi register
-            Message::Long => {context.rdi = 42;} // placeholder
+            Message::Short(data1, data2, data3) => {
+                context.rdi = data1 as usize;
+                context.rsi = data2 as usize;
+                context.rdx = data3 as usize;
+            },
+            Message::Long(data1, data2, data3) => {
+                context.rdi = data1 as usize;
+
+                context.rsi = match data2 {
+                    Data::Value(value) => value,
+                    Data::Rendezvous(rdv) => {
+                        context.rax |= (syscall::MESSAGE_DATA2_RDV |
+                                        syscall:: MESSAGE_LONG) as usize;
+                        self.give_rendezvous(rdv)
+                    }
+                } as usize;
+
+                context.rdx = match data3 {
+                    Data::Value(value) => value,
+                    Data::Rendezvous(rdv) => {
+                        context.rax |= (syscall::MESSAGE_DATA3_RDV |
+                                        syscall::MESSAGE_LONG) as usize;
+                        self.give_rendezvous(rdv)
+                    }
+                } as usize;   
+            }
         }
     }
 }
@@ -190,6 +237,7 @@ pub fn set_current_thread(thread: Box<Thread>) {
         schedule_thread(t); // make sure current thread gets reshceduled
     }
 }
+
 impl Drop for Process {
     fn drop(&mut self) {
         if self.page_table_physaddr == memory::active_pagetable_physaddr() {
@@ -247,7 +295,7 @@ Execution:
 }
 
 // create a kernel thread within the kernel stack space
-pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
+pub fn spawn_kernel_thread(function: fn()->(), mut handles: Vec<Arc<RwLock<Rendezvous>>>) -> u64 {
     let  new_thread = {
         let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE + USER_STACK_SIZE);
         let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
@@ -257,7 +305,7 @@ pub fn spawn_kernel_thread(function: fn()->()) -> u64 {
 
         Box::new(Thread {
             thread_id: unique_id(),
-            process: Arc::new(Process{page_table_physaddr: 0, handles: Vec::new() }),
+            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, handles: handles.drain(..).map(|h| Some(h)).collect()})),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
@@ -324,7 +372,7 @@ fn with_pagetable<F, R>(page_table_physaddr: u64, func: F) -> R where
     result
 }
 
-pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
+pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -> Result<u64, &'static str> {
     // https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
     // Check the header
     const MAGIC_BYTES: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -350,13 +398,9 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
         return with_pagetable(user_page_table_physaddr, || {
 
             let entry_point = obj.entry();
-            println!("Entry point: {:#016X}", entry_point);
 
             for segment in obj.segments() {
                 let segment_address = segment.address() as u64;
-
-                println!("Section {:?} : {:#016X} size {}",
-                         segment.name(), segment_address, segment.size());
 
                 let start_address = VirtAddr::new(segment_address);
                 let end_address = start_address + segment.size() as u64;
@@ -379,7 +423,6 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
                 memory::switch_to_pagetable(user_page_table_physaddr);
 
                 if let Ok(data) = segment.data() {
-                    println!(" data len : {}", data.len());
                     if data.len() > segment.size() as usize {
                         return Err("ELF data length > segment size");
                     } else if data.len() > 0 {
@@ -409,7 +452,7 @@ pub fn spawn_user_thread(bin: &[u8]) -> Result<u64, &'static str> {
                 Box::new(Thread {
                     thread_id: unique_id(),
                     // Create a new process
-                    process: Arc::new(Process {page_table_physaddr: user_page_table_physaddr, handles: Vec::from([keyboard_rendezvous()])}),
+                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, handles: handles.drain(..).map(|h| Some(h)).collect()})),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
@@ -498,10 +541,12 @@ pub fn fork_current_thread(current_context: &mut Context) {
             RUNNING.write().push_back(new_thread);
         } else {
             // Failed to allocate user stack
+            println!("err");
             current_context.rax = syscall::SYSCALL_ERROR_MEMALLOC; // Error code
         }
     } else {
         // Somehow no current thread
+        println!("err 2 ");
         current_context.rax = 2; // Error code
     }
 }

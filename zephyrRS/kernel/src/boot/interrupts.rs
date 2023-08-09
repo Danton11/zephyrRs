@@ -278,8 +278,10 @@ impl InterruptIndex {
     }
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
+
+interrupt_wrap!(keyboard_handler_inner => keyboard_interrupt_handler);
+extern "C" fn keyboard_handler_inner(context_addr: usize)
+                                     -> usize
 {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use spin::Mutex;
@@ -295,18 +297,25 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     let mut keyboard = KEYBOARD.lock();
     let mut port = Port::new(0x60);
 
+    let mut returning = true; // Back to original thread?
+
     let scancode: u8 = unsafe { port.read() };
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
                 DecodedKey::Unicode(character) => {
                     print!("{}", character);
-                    let (thread1, thread2) = KEYBOARD_RENDEZVOUS.write().send_message(None, Message::Short(character as usize));
+                    let (thread1, thread2) =
+                        KEYBOARD_RENDEZVOUS.write().send_message(
+                            None,
+                            Message::Short(character as u64, 0, 0));
+                    // thread1 should be scheduled to run next
                     if let Some(t) = thread2 {
                         process::schedule_thread(t);
                     }
                     if let Some(t) = thread1 {
                         process::schedule_thread(t);
+                        returning = false;
                     }
                 },
                 DecodedKey::RawKey(key) => print!("{:?}", key),
@@ -314,8 +323,14 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
         }
     }
 
+    let next_context = if returning {context_addr} else {
+        // Schedule a different thread to run
+        process::schedule_next(context_addr)
+    };
+
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
+    next_context
 }

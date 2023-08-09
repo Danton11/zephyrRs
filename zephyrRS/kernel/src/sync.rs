@@ -1,7 +1,8 @@
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
+use spin::RwLock;
 use core::mem;
 use crate::proc::process::Thread;
-
+use crate::syscall;
 
 //When send is called change state from Empty to Sending
 //When send is called, Keep sending state, return the calling thread and error (one sending thread
@@ -12,11 +13,15 @@ pub enum Rendezvous {
     Sending(Option<Box<Thread>>, Message),
     Receiving(Box<Thread>)
 }
-
-pub enum Message {
-    Short(usize),
-    Long, 
+pub enum Data {
+    Value(u64),
+    Rendezvous(Arc<RwLock<Rendezvous>>)
 }
+pub enum Message {
+    Short(u64,u64,u64),
+    Long(u64, Data, Data)
+}
+
 
 impl Rendezvous {
     pub fn send_message(&mut self, thread: Option<Box<Thread>>, message: Message) -> (Option<Box<Thread>>, Option<Box<Thread>>) {
@@ -55,13 +60,16 @@ impl Rendezvous {
                 // Complete the message transfer
                 if let Rendezvous::Sending(snd_thread, message) = mem::replace(self, Rendezvous::Empty) {
                     thread.return_message(message);
+                    if let Some(ref t) = snd_thread {
+                        t.return_error(0);
+                    }
                     return (Some(thread), snd_thread);
                 }
                 (None, None) // This should never be reached
             }
             Rendezvous::Receiving(_) => {
                 // Already receiving
-                thread.return_error(2);
+                thread.return_error(syscall::SYSCALL_ERROR_RECV_BLOCKING);
                 (Some(thread), None)
             }
         }
