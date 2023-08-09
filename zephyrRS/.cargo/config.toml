@@ -7,4 +7,4 @@ target = "x86_64-zephyr.json"
 
 [target.'cfg(target_os = "none")']
 runner = "bootimage runner"
-
+rustflags = ["-C", "relocation-model=static"]
