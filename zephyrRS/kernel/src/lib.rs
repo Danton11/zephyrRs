@@ -19,6 +19,7 @@ pub mod dev;
 pub mod mem;
 pub mod proc;
 pub mod syscall;
+pub mod sync;
 
 use dev::vga_buffer;
 

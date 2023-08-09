@@ -9,6 +9,7 @@ use core::arch::asm;
 use core::format_args;
 use core::fmt;
 
+//pub mod serial;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -61,25 +62,7 @@ fn panic(info: &PanicInfo) -> ! {
     loop {}
 }
 
-////////////////////////////
-// Thread library
-//
-// Interface here:
-//   https://doc.rust-lang.org/book/ch16-01-threads.html
-//
-// std implementation is here:
-//   https://github.com/rust-lang/rust/blob/master/library/std/src/sys/unix/thread.rs
-//
-// API
-//  pub struct Thread {id: u64,}
-//  pub fn spawn<F, T>(f: F) -> JoinHandle<T> where    F: FnOnce() -> T,    F: Send + 'static,    T: Send + 'static,
 
-
-/// Spawn a new thread with a given entry point
-///
-/// # Returns
-///
-///  Ok(thread_id) or Err(error_code)
 ///
 fn thread_spawn(func: extern "C" fn() -> ()) -> Result<u64, u64> {
     let mut tid: u64 = 0;
@@ -108,15 +91,12 @@ fn thread_spawn(func: extern "C" fn() -> ()) -> Result<u64, u64> {
     }
     Ok(tid)
 }
-
-
-
 extern "C" fn test() {
     println!("Hello from forked user thread !");
 
     for i in 1..11 {
-        println!("Thread : {}", i);
-        for _ in 1..1000000000 {
+        println!("Thread (2) : {}", i);
+        for _ in 1..10000000 {
             unsafe { asm!("nop");}
         }
     }
@@ -124,8 +104,7 @@ extern "C" fn test() {
 
 #[no_mangle]
 pub unsafe extern "sysv64" fn _start() -> ! {
-    println!("Hello from thread initial user thread !");
-
+    // Information passed from the operating system
     let heap_start: usize;
     let heap_size: usize;
     asm!("",
@@ -133,22 +112,36 @@ pub unsafe extern "sysv64" fn _start() -> ! {
          lateout("rcx") heap_size,
          options(pure, nomem, nostack)
     );
-    //println!("Heap start {:#030X}, size: {} bytes ({} Mb)", heap_start, heap_size, heap_size / (1024 * 1024));
+    println!("Heap start {:#016X}, size: {} bytes ({} Mb)", heap_start, heap_size, heap_size / (1024 * 1024));
 
-    println!("Heap start: {}", heap_start);
-    println!("Heap size: {} bytes", heap_size);
-    println!("Heap size (MB): {} Mb", heap_size / (1024 * 1024));
+    let tid = thread_spawn(test).unwrap();
 
-    //let _tid = thread_spawn(test).unwrap();
-    //let _tid = thread_spawn(test).unwrap();
-    //let _tid = thread_spawn(test).unwrap();
+    for i in 1..10 {
+        println!("Thread (1) {}", i);
+        for i in 1..10000000 {
+            unsafe { asm!("nop");}
+        }
+    }
 
-//    for i in 1..11 {
-//        println!("Thread (1): {}",  i);
-//        for _ in 1..1000000000 {
-//            unsafe { asm!("nop");}
-//        }
-//    }
+    ALLOCATOR.lock().init(heap_start, heap_size);
+
+    loop{
+        println!("Calling sys_read");
+        let err: u64;
+        let value: u64;
+        asm!("mov rax, 3", // sys_receive
+             "mov rdi, 0", // handle
+             "syscall",
+             lateout("rax") err,
+             lateout("rdi") value);
+        let ch = char::from_u32(value as u32).unwrap();
+        println!("Received: {} , {} => {}", err, value, ch);
+        if ch == 'x' {
+            println!("Exiting");
+            break;
+        }
+    }
+
     asm!("mov rax, 1", // exit_current_thread syscall
          "syscall");
     loop{}

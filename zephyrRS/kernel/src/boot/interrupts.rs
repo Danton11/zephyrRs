@@ -1,9 +1,9 @@
-
-
 use core::arch::asm;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
-
+use alloc::sync::Arc;
+use spin::RwLock;
+use crate::sync::{Rendezvous, Message};
 use crate::println;
 use crate::boot::gdt;
 use crate::print;
@@ -32,18 +32,19 @@ lazy_static! {
         idt
     };
 }
+lazy_static! {
+    static ref KEYBOARD_RENDEZVOUS: Arc<RwLock<Rendezvous>> =
+        Arc::new(RwLock::new(Rendezvous::Empty));
+}
+
 
 pub fn init_idt() {
     IDT.load();
 }
 
-/// Structure representing values pushed on the stack when an interrupt occurs
-///
 /// CPU registers in x86-64 mode
 ///   https://wiki.osdev.org/CPU_Registers_x86-64
-///
-/// Note: Is repr(packed) needed? No padding should be inserted
-///       since all fields are usize.
+
 #[derive(Clone, Debug)]
 #[repr(C)]
 pub struct Context {
@@ -79,10 +80,10 @@ pub struct Context {
 /// Number of bytes needed to store a Context struct
 pub const INTERRUPT_CONTEXT_SIZE: usize = 20 * 8;
 
-extern "C" fn timer_handler(context: &mut Context) -> usize {
+extern "C" fn timer_handler(context_addr: usize) -> usize {
     // Process scheduler decides which process to schedule
     // Returns the stack pointer to switch to.
-    let next_stack = process::schedule_next(context);
+    let next_stack = process::schedule_next(context_addr);
 
     // Tell the PIC that the interrupt has been processed
     unsafe {
@@ -92,21 +93,40 @@ extern "C" fn timer_handler(context: &mut Context) -> usize {
     next_stack
 }
 
-/// Handler for the timer interrupt.
-///
-/// This handler is different from other handlers because it is where
-/// context switching is done. This means that we need to push the
-/// state of registers on one kernel stack, change kernel stack,
-/// and then pop the registers from the new stack.
-///
-/// Notes:
-///  - The calling convention ("x86-interrupt") doesn't have any effect,
-///    apart from satisfying the type checker in IDT `set_stack_index`,
-///    because the function is [naked].
-///  - A naked function is used so that we can control which registers
-///    are read and written. During a context switch we want to pop
-///    different values to those pushed.
-///
+/// The keyboard interrupt handler will send messages to this.
+pub fn keyboard_rendezvous() -> Arc<RwLock<Rendezvous>> {
+    KEYBOARD_RENDEZVOUS.clone()
+}
+
+pub fn launch_thread(context_addr: usize) -> ! {
+    unsafe {
+        asm!("mov rsp, rdi", // Set the stack to the Context address
+
+             "pop r15",
+             "pop r14",
+             "pop r13",
+
+             "pop r12",
+             "pop r11",
+             "pop r10",
+             "pop r9",
+
+             "pop r8",
+             "pop rbp",
+             "pop rsi",
+             "pop rdi",
+
+             "pop rdx",
+             "pop rcx",
+             "pop rbx",
+             "pop rax",
+
+             "sti", // Enable interrupts
+             "iretq",// Interrupt return
+             in("rdi") context_addr,
+             options(noreturn));
+    }
+}
 /// Macro wrapper adapted from MOROS by Vincent Ollivier
 /// https://github.com/vinc/moros/blob/trunk/src/sys/idt.rs#L123
 #[macro_export]
@@ -279,7 +299,16 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
-                DecodedKey::Unicode(character) => print!("{}", character),
+                DecodedKey::Unicode(character) => {
+                    print!("{}", character);
+                    let (thread1, thread2) = KEYBOARD_RENDEZVOUS.write().send_message(None, Message::Short(character as usize));
+                    if let Some(t) = thread2 {
+                        process::schedule_thread(t);
+                    }
+                    if let Some(t) = thread1 {
+                        process::schedule_thread(t);
+                    }
+                },
                 DecodedKey::RawKey(key) => print!("{:?}", key),
             }
         }

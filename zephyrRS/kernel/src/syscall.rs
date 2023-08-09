@@ -1,54 +1,31 @@
-//! Entry point for syscalls
-//!
-//! Initialise syscalls, entry point and syscall handlers
-//!
-//! Syscalls
-//! --------
-//!
-//! syscall function selector in RAX
-//!
-//! 0   fork_current_thread() -> (RAX: errcode, RDI: thread_id)
-//! 1   exit_current_thread() -> !   (does not return)
-//! 2   write(RDI: *const u8, RSI: usize) -> ()
-//!
-//! Potential future syscalls
-//! -------------------------
-//!
-//! - yield() -> ()              Thread yields control
-//! - thread_fork() -> u64       Spawn a new thread.
-//!                              Returns zero to new thread, thread ID to original
-//! - thread_kill(u64) -> bool   Kill the specified thread. Must be in the same process.
-//! - unique_id() -> u64         Return a unique number
-//!
-//! - open(str) -> handle        Open a vfs node
-//! - send(handle, message) -> bool
-//! - recv(handle) -> message
-//! - send_recv(handle, message) -> message
 use core::{arch::asm, slice, str};
-use crate::println;
+use core::mem::drop;
+use crate::{println,print};
 use crate::proc::process;
 use crate::boot::gdt;
+use crate::boot::interrupts;
 use crate::boot::interrupts::Context;
+use crate::sync::Rendezvous;
 
 
+// Constants for Model Specific Registers (MSRs) related to syscall handling
 const MSR_STAR: usize = 0xc0000081;
 const MSR_LSTAR: usize = 0xc0000082;
 const MSR_FMASK: usize = 0xc0000084;
-/// Register to store the kernel GS 64-bit address
 const MSR_KERNEL_GS_BASE: usize = 0xC0000102;
 
-/// Subtract this offset from the kernel stack
-/// stored in the TSS interrupt table.
-/// This is to enable syscalls to be interrupted.
+// Offset for kernel stack during syscalls. This is to ensure syscalls can be interrupted.
 const SYSCALL_KERNEL_STACK_OFFSET: u64 = 1024;
 
+
+// Error codes for system calls
+pub const SYSCALL_ERROR_SEND_BLOCKING: usize = 1;
+pub const SYSCALL_ERROR_RECV_BLOCKING: usize = 2;
+pub const SYSCALL_ERROR_INVALID_HANDLE: usize = 3;
 pub const SYSCALL_ERROR_MEMALLOC: usize = 1;
 
-/// Set up syscall handler
-///
-/// Note: This depends on the order of the GDT table
-///
-/// https://nfil.dev/kernel/rust/coding/rust-kernel-to-userspace-and-back/
+/// Initialize syscall handling by setting up necessary Model Specific Registers (MSRs)
+/// and enabling the System Call Extensions (SCE) for syscall/sysret opcodes.
 pub fn init() {
     let handler_addr = handle_syscall as *const () as u64;
     unsafe {
@@ -100,7 +77,8 @@ pub fn init() {
     }
 }
 
-
+/// Naked syscall handler function which sets up the required environment for processing syscalls.
+/// It saves the current context and prepares the stack to make a transition from user space to kernel space.
 #[naked]
 extern "C" fn handle_syscall() {
     unsafe {
@@ -186,6 +164,9 @@ extern "C" fn handle_syscall() {
             options(noreturn));
     }
 }
+
+/// Dispatcher function that handles syscalls based on their ID.
+/// It redirects to the appropriate syscall handler function after setting up the execution environment.
 extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64,
                                arg1: u64, arg2: u64) {
 
@@ -200,10 +181,14 @@ extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64,
         0 => process::fork_current_thread(context),
         1 => process::exit_current_thread(context),
         2 => sys_write(arg1 as *const u8, arg2 as usize),
+        3 => sys_receive(context_ptr, arg1),
         _ => println!("Unknown syscall {:?} {} {} {}",
                        context_ptr, syscall_id, arg1, arg2)
     }
 }
+
+/// System call to write a string to the console.
+/// Given a pointer to a string and its size, this syscall prints the string to the console.
 extern "C" fn sys_write(ptr: *const u8, size:usize) {
     if size == 0 {
         return;
@@ -212,12 +197,55 @@ extern "C" fn sys_write(ptr: *const u8, size:usize) {
     let slice = unsafe {slice::from_raw_parts(ptr, size)};
 
     if let Ok(s) = str::from_utf8(slice) {
-        println!("{}",s);
+        print!("{}",s);
     }
 }
 
 //extern "C" fn sys_read() {
 //    println!("read");
 //}
+//pub fn drop<T>(_x: T) { }
+//
+fn sys_receive(context_ptr: *mut Context, handle: u64) {
+    // Extract the current thread
+    if let Some(mut thread) = process::take_current_thread() {
+        let current_tid = thread.get_thread_id();
+        thread.set_context(context_ptr);
 
 
+        // Get the Rendezvous and call
+        if let Some(rdv) = thread.get_handles(handle) {
+            let (thread1, thread2) = rdv.write().receive(thread);
+            // thread1 should be started asap
+            // thread2 should be scheduled
+
+            let mut returning = false;
+            for maybe_thread in [thread1, thread2] {
+                if let Some(t) = maybe_thread {
+                    if t.get_thread_id() == current_tid {
+                        // Same thread -> return
+                        process::set_current_thread(t);
+                        returning = true;
+                    } else {
+                        process::schedule_thread(t);
+                    }
+                }
+            }
+
+            if !returning {
+                // Original thread is waiting.
+                // Should switch to a different thread
+                // For now just wait for the timer interrupt
+                unsafe {
+                    asm!("sti",
+                         "2:",
+                         "hlt",
+                         "jmp 2b");
+                }
+                drop(rdv);
+                let new_context_addr = process::schedule_next(context_ptr as usize);
+                interrupts::launch_thread(new_context_addr);
+            }
+        }
+    }
+}
