@@ -12,6 +12,9 @@
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use lazy_static::lazy_static;
+use spin::RwLock;
+use alloc::sync::Arc;
 //use bootloader::BootInfo;
 
 pub mod boot;
@@ -20,8 +23,15 @@ pub mod mem;
 pub mod proc;
 pub mod syscall;
 pub mod sync;
+use sync::{Message, Socket};
 
 use dev::vga_buffer;
+
+lazy_static! {
+    pub static ref ID_SOCKET: Arc<RwLock<Socket>> =
+        Arc::new(RwLock::new(Socket::Empty));
+}
+
 
 //init interrupt handler
 pub fn init() {

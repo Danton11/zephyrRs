@@ -1,19 +1,20 @@
-use x86_64::VirtAddr;
+use x86_64::{VirtAddr, PhysAddr};
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PageTableFlags;
 use spin::RwLock;
 use lazy_static::lazy_static;
 extern crate alloc;
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec, sync::Arc};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec, sync::Arc, string::String};
 use core::arch::asm;
 use crate::{println, serial_println};
-use crate::boot::interrupts::{Context, INTERRUPT_CONTEXT_SIZE, keyboard_rendezvous};
+use crate::boot::interrupts::{Context, INTERRUPT_CONTEXT_SIZE, keyboard_socket};
 use crate::boot::gdt;
 use crate::mem::memory;
 use crate::syscall;
-use crate::sync::Rendezvous;
+use crate::sync::Socket;
 use crate::sync::{Message,Data};
 use core::fmt;
+use crate::ID_SOCKET;
 
 //use core::ptr;
 use object::{Object, ObjectSegment};
@@ -48,11 +49,13 @@ pub fn unique_id() -> u64 {
 }
 
 pub struct Process {
+    //A Process has a page_table_physaddr, which is the physical address of its page table, allowing it to have its own separate virtual memory space.
     page_table_physaddr: u64,
-    handles: Vec<Option<Arc<RwLock<Rendezvous>>>>
+    fdescriptor: Vec<Option<Arc<RwLock<Socket>>>>,
+    mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ThreadType {
     Kernel,
     User,
@@ -141,39 +144,37 @@ impl Thread {
         serial_println!("Thread ID:              {}", self.thread_id);
         serial_println!("Thread Type:            {:?}", self.thread_type);
         serial_println!("RIP:                    {:#016X}", contextRip);
-        serial_println!("Kernel Stack ({} bytes): {:#016X} - {:#016X}", KERNEL_STACK_SIZE, kernel_stack_start, self.kernel_stack_end);
+        serial_println!("Kernel Stack  {:#016X} - {:#016X}: ({} bytes)",  kernel_stack_start, self.kernel_stack_end, KERNEL_STACK_SIZE);
         serial_println!("Context Address:        {:#016X}", self.context);
-        serial_println!("Thread Stack ({} bytes): {:#016X} - {:#016X}", USER_STACK_SIZE, user_stack_start, self.user_stack_end);
+        serial_println!("Thread Stack {:#016X} - {:#016X} ({} bytes)", user_stack_start, self.user_stack_end, USER_STACK_SIZE);
         serial_println!("RSP:                    {:#016X}", contextRsp);
         serial_println!("-----------------------------------------------");
     }
 
-    pub fn get_handles(&self, id: u64) -> Option<Arc<RwLock<Rendezvous>>> {
-            self.process.read().handles.get(id as usize).unwrap_or(&None).as_ref().map(|rv| rv.clone()) // Option<Arc<>>
+    pub fn get_fdescriptor(&self, id: u64) -> Option<Arc<RwLock<Socket>>> {
+            self.process.read().fdescriptor.get(id as usize).unwrap_or(&None).as_ref().map(|rv| rv.clone()) // Option<Arc<>>
     }
 
-    /// Take the rendezvous, leaving handle empty (None)
-    pub fn take_rendezvous(&self, id: u64)
-                           -> Option<Arc<RwLock<Rendezvous>>> {
-        self.process.write().handles.get_mut(id as usize).map_or(None, |elem| elem.take())
+    pub fn take_socket(&self, id: u64)-> Option<Arc<RwLock<Socket>>> {
+        self.process.write().fdescriptor.get_mut(id as usize).map_or(None, |elem| elem.take())
     }
 
-    /// Add a rendezvous to the process, returning the handle
-    pub fn give_rendezvous(&self, rendezvous: Arc<RwLock<Rendezvous>>) -> u64 {
-        // Lock the handles
-        let handles = &mut self.process.write().handles;
+    /// Add a socket to the process, returning the handle
+    pub fn give_socket(&self, socket: Arc<RwLock<Socket>>) -> u64 {
+        // Lock the fdescriptor
+        let fdescriptor = &mut self.process.write().fdescriptor;
 
         // Find empty handle slot
-        for (pos, handle) in handles.iter().enumerate() {
+        for (pos, handle) in fdescriptor.iter().enumerate() {
             if handle.is_none() {
-                // Found empty slot => Store rendezvous
-                handles[pos] = Some(rendezvous);
+                // Found empty slot => Store socket
+                fdescriptor[pos] = Some(socket);
                 return pos as u64;
             }
         }
         // All full => Add new handle
-        handles.push(Some(rendezvous));
-        (handles.len() - 1) as u64
+        fdescriptor.push(Some(socket));
+        (fdescriptor.len() - 1) as u64
     }
 
     fn context(&self) -> &Context {
@@ -206,23 +207,37 @@ impl Thread {
 
                 context.rsi = match data2 {
                     Data::Value(value) => value,
-                    Data::Rendezvous(rdv) => {
+                    Data::Socket(rdv) => {
                         context.rax |= (syscall::MESSAGE_DATA2_RDV |
                                         syscall:: MESSAGE_LONG) as usize;
-                        self.give_rendezvous(rdv)
+                        self.give_socket(rdv)
                     }
                 } as usize;
 
                 context.rdx = match data3 {
                     Data::Value(value) => value,
-                    Data::Rendezvous(rdv) => {
+                    Data::Socket(rdv) => {
                         context.rax |= (syscall::MESSAGE_DATA3_RDV |
                                         syscall::MESSAGE_LONG) as usize;
-                        self.give_rendezvous(rdv)
+                        self.give_socket(rdv)
                     }
                 } as usize;   
             }
         }
+    }
+//    pub fn memory_usage(&self) -> (u64, u64) {
+//        let stack_usage = self.user_stack_end - self.get_current_stack_pointer();
+//        let heap_usage: u64 = self.heap_allocations.read().iter().sum();
+//        
+//        (stack_usage, heap_usage)
+//    }
+
+    fn get_current_stack_pointer(&self) -> u64 {
+        // This method depends on your architecture and how you've set up your system.
+        // For x86_64, you'd typically use the RSP register:
+        let rsp: u64;
+        unsafe { asm!("mov {}, rsp", out(reg) rsp) };
+        rsp
     }
 }
 
@@ -241,9 +256,24 @@ pub fn set_current_thread(thread: Box<Thread>) {
 impl Drop for Process {
     fn drop(&mut self) {
         if self.page_table_physaddr == memory::active_pagetable_physaddr() {
-            memory::switch_to_kernel_pagetable();
+            memory::kernel_mode();
         }
         memory::free_user_pagetables(self.page_table_physaddr);
+        println!("[!] - Process with page table at {:#x} deallocated its user page tables", self.page_table_physaddr);
+    }
+}
+
+impl Process {
+    fn add_handle(&mut self, rv: Arc<RwLock<Socket>>) -> usize {
+        // Find if there is an empty fdescriptor slot
+        if let Some(index) = self.fdescriptor.iter().position(
+            |handle| handle.is_none()) {
+            self.fdescriptor[index] = Some(rv);
+            return index;
+        }
+        // No free slot -> Add one
+        self.fdescriptor.push(Some(rv));
+        self.fdescriptor.len() - 1
     }
 }
 
@@ -251,6 +281,7 @@ impl Drop for Process {
 impl Drop for Thread {
     fn drop(&mut self) {
         memory::free_user_stack(VirtAddr::new(self.user_stack_end));
+        println!("[!] - Thread {} deallocated user stack at {:#x}", self.thread_id, self.user_stack_end);
     }
 }
 
@@ -263,10 +294,9 @@ impl fmt::Display for Thread {
         let user_stack_start = self.user_stack_end - (USER_STACK_SIZE as u64);
         let contextRip = context.rip;
         let contextRsp = context.rsp;
-
-        write!(f, "\
+        serial_println!("\n
 ===========================================
-Thread ID: {}
+Thread ID: {} , {:?}
 ===========================================
 Kernel Stack:
     Start: {:#016X}
@@ -282,7 +312,34 @@ Execution:
     RIP: {:#016X}
 ===========================================
 ",
-               self.thread_id, contextRip,
+               self.thread_id, self.thread_type, contextRip,
+
+               kernel_stack_start, self.kernel_stack_end,
+
+               self.context,
+               
+               user_stack_start, self.user_stack_end,
+               
+               contextRsp);
+        write!(f, "\
+===========================================
+Thread ID: {} , {:?}
+===========================================
+Kernel Stack:
+    Start: {:#016X}
+    End:   {:#016X}
+    Context Address: {:#016X}
+-------------------------------------------
+User Stack:
+    Start: {:#016X}
+    End:   {:#016X}
+    RSP:   {:#016X}
+-------------------------------------------
+Execution:
+    RIP: {:#016X}
+===========================================
+",
+               self.thread_id, self.thread_type, contextRip,
 
                kernel_stack_start, self.kernel_stack_end,
 
@@ -295,17 +352,17 @@ Execution:
 }
 
 // create a kernel thread within the kernel stack space
-pub fn spawn_kernel_thread(function: fn()->(), mut handles: Vec<Arc<RwLock<Rendezvous>>>) -> u64 {
+pub fn spawn_kernel_thread(function: fn()->(), mut fdescriptor: Vec<Arc<RwLock<Socket>>>) -> u64 {
     let  new_thread = {
         let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE + USER_STACK_SIZE);
         let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
         let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
         let user_stack_end = kernel_stack_end + (USER_STACK_SIZE as u64);
 
-
+        let uid = unique_id();
         Box::new(Thread {
-            thread_id: unique_id(),
-            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, handles: handles.drain(..).map(|h| Some(h)).collect()})),
+            thread_id: uid,
+            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, fdescriptor: fdescriptor.drain(..).map(|h| Some(h)).collect(), mounts: Arc::new(RwLock::new(Vec::new()))})),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
@@ -336,8 +393,9 @@ pub fn spawn_kernel_thread(function: fn()->(), mut handles: Vec<Arc<RwLock<Rende
     context.rsp = new_thread.user_stack_end as usize;
 
     let thread_id = new_thread.thread_id;
-
-    println!("New kernel thread {}", new_thread);
+    
+    //println!("New kernel thread {}", new_thread);
+    new_thread.print_details();
 
     schedule_thread(new_thread);
     thread_id
@@ -371,8 +429,11 @@ fn with_pagetable<F, R>(page_table_physaddr: u64, func: F) -> R where
 
     result
 }
-
-pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -> Result<u64, &'static str> {
+pub struct Params {
+    pub fdescriptor: Vec<Arc<RwLock<Socket>>>,
+    pub mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>> 
+}
+pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str> {
     // https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
     // Check the header
     const MAGIC_BYTES: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -382,18 +443,20 @@ pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -
     }
     
     // Use the object crate to parse the ELF file
-    // https://crates.io/crates/object
     if let Ok(obj) = object::File::parse(bin) {
 
         // Create a user pagetable with only kernel pages
-        let (user_page_table_ptr, user_page_table_physaddr) =
-            memory::create_kernel_only_pagetable();
+        let (user_page_table_ptr, user_page_table_physaddr) = memory::create_kernel_only_pagetable();
+        serial_println!("Thread allocated page table at physical address {:#x}", user_page_table_physaddr);
 
         // Allocate user heap
-        memory::create_user_ondemand_pages(
-            user_page_table_ptr,
+        if memory::create_user_ondemand_pages(
+            user_page_table_physaddr,
             VirtAddr::new(USER_HEAP_START),
-            USER_HEAP_SIZE);
+            USER_HEAP_SIZE).is_err() {
+            return Err("Couldn't allocate on-demand pages");
+        }
+
 
         return with_pagetable(user_page_table_physaddr, || {
 
@@ -441,6 +504,7 @@ pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -
             }
 
 
+            let uid = unique_id();
             // Create the new Thread struct
             let new_thread = {
                 let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
@@ -448,11 +512,12 @@ pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -
                 let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
                 
                 let (_user_stack_start, user_stack_end) = memory::allocate_user_stack(user_page_table_ptr)?;
-
+                println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
+                let mut fdescriptor = params.fdescriptor;
                 Box::new(Thread {
-                    thread_id: unique_id(),
+                    thread_id:  uid,
                     // Create a new process
-                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, handles: handles.drain(..).map(|h| Some(h)).collect()})),
+                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, fdescriptor: fdescriptor.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
@@ -491,7 +556,7 @@ pub fn spawn_user_thread(bin: &[u8],mut handles: Vec<Arc<RwLock<Rendezvous>>>) -
             new_thread.print_details();
             schedule_thread(new_thread);
 
-
+            
             return Ok(thread_id);
         });
     }
@@ -526,13 +591,11 @@ pub fn fork_current_thread(current_context: &mut Context) {
             let new_context = unsafe {&mut *(new_thread.context as *mut Context)};
             *new_context = current_context.clone();
 
-            // Set new stack pointer
             new_context.rsp = new_thread.user_stack_end as usize;
 
-            // Set return values in rax
-            new_context.rax = 0; // No error
-            new_context.rdi = 0; // Indicates that this is the new thread
-            current_context.rax = 0; // No error
+            new_context.rax = 0; 
+            new_context.rdi = 0; 
+            current_context.rax = 0; 
             current_context.rdi = new_thread.thread_id as usize;
 
             let _tid = new_thread.thread_id;
@@ -540,14 +603,12 @@ pub fn fork_current_thread(current_context: &mut Context) {
             
             RUNNING.write().push_back(new_thread);
         } else {
-            // Failed to allocate user stack
             println!("err");
             current_context.rax = syscall::SYSCALL_ERROR_MEMALLOC; // Error code
         }
     } else {
-        // Somehow no current thread
         println!("err 2 ");
-        current_context.rax = 2; // Error code
+        current_context.rax = 2; 
     }
 }
 
@@ -557,16 +618,10 @@ pub fn exit_current_thread(_current_context: &mut Context) {
         let mut current_thread = CURR_THREAD.write();
 
         if let Some(_thread) = current_thread.take() {
-            // Free user stack pages
-
-            // If this is the last thread in this process, free shared
-            // memory and page tables
-
-            // Drop thread, free kernel stack
+            // free user stack pages
         }
     }
-    // Can't return from this syscall, so this thread now waits for a
-    // timer interrupt to switch context.
+    // wait for timer interrupt
     unsafe {
         asm!("sti",
              "2:",
@@ -581,7 +636,9 @@ pub fn schedule_next(context_addr: usize) -> usize {
 
     if let Some(thread) = current_thread.take() {
         // Put the current thread to the back of the queue
-
+        if thread.thread_type != ThreadType::Kernel {
+            serial_println!("[!] - Scheduling thread {}: Using page table at {:#x} and kernel stack at {:#x}", thread.thread_id, thread.page_table_phys, thread.kernel_stack_end);
+        } 
         // Update the stack pointer
         let mut thread_mut = thread;
 
@@ -621,3 +678,71 @@ pub fn schedule_next(context_addr: usize) -> usize {
         None => 0
     }
 }
+
+pub fn open_path(current_context: &mut Context,path: &str) -> Result<usize, usize> {
+    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
+        println!("[!] - Thread {} opening {}", current_thread.thread_id, path);
+
+        let mut process = current_thread.process.write();
+
+        let option = if let Some((_mount, rend)) = process.mounts.read().iter().find(|&(mount, _rend)| mount == path) {
+                Some(rend.clone())
+            } else {
+                None
+            };
+
+        if let Some(rv) = option {
+            let handle = process.add_handle(rv.clone());
+            return Ok(handle);
+        } else {
+            return Err(7);
+        }
+    }
+    Err(0)
+}
+
+
+pub fn allocate_memory_chunk(pages_required: u64,max_physical_address: u64) -> Result<(VirtAddr, PhysAddr), usize> {
+    // Get the current active thread.
+    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
+        println!("[!] - Thread {} requesting {} pages", current_thread.get_thread_id(), pages_required);
+
+        // Fetch a virtual address for an available chunk of pages.
+        let chunk_start_addr = match memory::find_available_page_chunk(
+            current_thread.page_table_phys) {
+            Some(address) => address,
+            None => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
+        };
+        if max_physical_address != 0 {
+            // If the user specifies a max physical address, 
+            // we need to allocate consecutive frames.
+            let physical_start_addr = match memory::create_sequential_pages(
+                current_thread.page_table_phys,
+                chunk_start_addr,
+                pages_required,
+                max_physical_address) {
+                Ok(phys_addr) => phys_addr,
+                Err(_) => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
+            };
+
+            return Ok((chunk_start_addr, physical_start_addr));
+        } else {
+            // If no specific physical address range is required,
+            // allocate frames on an on-demand basis.
+            
+            if memory::create_user_ondemand_pages(
+                current_thread.page_table_phys,
+                chunk_start_addr,
+                pages_required).is_err() {
+                return Err(syscall::SYSCALL_ERROR_MEMALLOC);
+            }
+
+            // Since we're not ensuring sequential physical addresses, 
+            // we return 0 for the physical address.
+            return Ok((chunk_start_addr, PhysAddr::new(0)));
+        }
+    }
+    // Return an error if no active thread is found.
+    Err(syscall::SYSCALL_ERROR_MEMALLOC)
+}
+
