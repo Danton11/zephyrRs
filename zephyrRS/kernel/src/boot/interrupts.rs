@@ -3,11 +3,12 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use spin::RwLock;
-use crate::sync::{Rendezvous, Message};
+use crate::sync::{Socket, Message, MESSAGE_TYPE_KEY};
 use crate::println;
 use crate::boot::gdt;
 use crate::print;
 use crate::proc::process;
+use crate::mem::memory;
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -33,8 +34,8 @@ lazy_static! {
     };
 }
 lazy_static! {
-    static ref KEYBOARD_RENDEZVOUS: Arc<RwLock<Rendezvous>> =
-        Arc::new(RwLock::new(Rendezvous::Empty));
+    static ref KEYBOARD_SOCKET: Arc<RwLock<Socket>> =
+        Arc::new(RwLock::new(Socket::Empty));
 }
 
 
@@ -94,8 +95,8 @@ extern "C" fn timer_handler(context_addr: usize) -> usize {
 }
 
 /// The keyboard interrupt handler will send messages to this.
-pub fn keyboard_rendezvous() -> Arc<RwLock<Rendezvous>> {
-    KEYBOARD_RENDEZVOUS.clone()
+pub fn keyboard_socket() -> Arc<RwLock<Socket>> {
+    KEYBOARD_SOCKET.clone()
 }
 
 pub fn launch_thread(context_addr: usize) -> ! {
@@ -127,8 +128,8 @@ pub fn launch_thread(context_addr: usize) -> ! {
              options(noreturn));
     }
 }
-/// Macro wrapper adapted from MOROS by Vincent Ollivier
-/// https://github.com/vinc/moros/blob/trunk/src/sys/idt.rs#L123
+
+
 #[macro_export]
 macro_rules! interrupt_wrap {
     ($func: ident => $wrapper:ident) => {
@@ -229,17 +230,28 @@ extern "x86-interrupt" fn double_fault_handler(
 use x86_64::structures::idt::PageFaultErrorCode;
 use crate::hlt_loop;
 
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
+extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,error_code: PageFaultErrorCode,) {
     use x86_64::registers::control::Cr2;
+    let accessed_virtaddr = Cr2::read();
 
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
-    hlt_loop();
+    if error_code == (PageFaultErrorCode::PROTECTION_VIOLATION |
+                      PageFaultErrorCode::CAUSED_BY_WRITE |
+                      PageFaultErrorCode::USER_MODE) {
+        // User code tried to access a read-only page
+        // Missing stack or heap frame
+
+        if let Err(msg) = memory::allocate_missing_ondemand_frame(accessed_virtaddr) {
+            println!("Page fault error: {}", msg);
+            hlt_loop();
+        }
+    } else {
+        println!("EXCEPTION: PAGE FAULT");
+        println!("Accessed Address: {:?}", accessed_virtaddr);
+        println!("Error Code: {:?}", error_code);
+        println!("{:#?}", stack_frame);
+
+        hlt_loop();
+    }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -306,9 +318,7 @@ extern "C" fn keyboard_handler_inner(context_addr: usize)
                 DecodedKey::Unicode(character) => {
                     print!("{}", character);
                     let (thread1, thread2) =
-                        KEYBOARD_RENDEZVOUS.write().send_message(
-                            None,
-                            Message::Short(character as u64, 0, 0));
+                        KEYBOARD_SOCKET.write().send_message(None,Message::Short(MESSAGE_TYPE_KEY, character as u64, 0)); // send message to redezvous, bin/main will pick it up
                     // thread1 should be scheduled to run next
                     if let Some(t) = thread2 {
                         process::schedule_thread(t);

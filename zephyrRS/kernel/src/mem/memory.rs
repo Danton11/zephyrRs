@@ -1,6 +1,44 @@
+/*!
+# Memory Management and Paging Utilities for a Kernel
+
+This module provides a set of utilities and abstractions for managing memory and paging in a kernel environment, especially designed for x86_64 architectures. The tools here can be utilized for initializing and managing page tables, allocating and deallocating memory frames, handling page faults, and dealing with virtual-to-physical memory mappings.
+
+## Key Components:
+
+1. **MemoryInfo**: A structure holding important information about the boot state of the system, including boot info, physical memory offset, a frame allocator, and the kernel's level 4 page table.
+
+2. **PageFrameAllocator**: An allocator for physical memory frames. It leverages the memory map provided by the bootloader to keep track of used and free frames.
+
+3. **OffsetPageTable**: A utility for mapping virtual addresses to physical addresses and vice versa.
+
+4. **FrameAllocator**: An interface for allocating and deallocating physical memory frames.
+
+5. **Mapping Utilities**: Functions to map and unmap pages, allocate user-space stacks, and handle page faults.
+
+6. **Debugging and Testing**: Utilities to print memory layout, perform checks, and benchmark memory allocation performance.
+
+## How to Use:
+
+1. Call `init` with the boot info to initialize the memory system. This sets up the page tables, memory map, and allocates the initial heap.
+ 
+2. Use the `PageFrameAllocator` to allocate and deallocate physical memory frames as needed.
+
+3. Use `OffsetPageTable` to manage and manipulate the virtual memory mappings.
+
+4. `allocate_pages` and `deallocate_page` can be used to allocate and free pages in virtual memory.
+
+5. Handle page faults and on-demand memory allocations with the provided utilities.
+
+6. Use `test_alloc_times` to benchmark the performance of the memory allocation system.
+
+**Note**: Many of these functions are unsafe and should be used with caution. Ensure that you have a good understanding of virtual memory, paging, and the specific requirements and quirks of the x86_64 architecture before manipulating these utilities.
+
+*/
+
+
 use crate::{println, serial_println};
 use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
-use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive, PageSize, page_table::PageTableEntry,},PhysAddr, VirtAddr,};
+use x86_64::{structures::paging::{FrameAllocator, Mapper, mapper::MapToError,OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, page::PageRangeInclusive, PageSize, page_table::PageTableEntry, Translate,},PhysAddr, VirtAddr,};
 use crate::mem::allocator;
 use alloc::{vec, borrow::ToOwned};
 use alloc::string::String;
@@ -12,6 +50,13 @@ use core::arch::asm;
 
 const THREAD_STACK_PAGE_INDEX: [u8;3] = [5,0,0];
 
+/**
+MemoryInfo stores information about the kernel's memory environment. 
+It has references to boot information, the physical memory offset, 
+the frame allocator, and the kernel's top-level page table.
+
+The static variable MEMORY_INFO is used to store this information for global access.
+*/
 struct MemoryInfo {
     boot_info: &'static BootInfo,
     phys_memory_offset: VirtAddr,
@@ -162,7 +207,11 @@ pub fn active_pagetable_ptr() -> *mut PageTable {
 
 
 //-----------
-
+/**
+Manages the allocation and deallocation of physical frames of memory.
+Uses the memory map provided by the bootloader to determine which frames are usable.
+Contains functions like allocate_frame, deallocate_frame, usable_frames, etc., to manage frames.
+*/
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct PageFrameAllocator {
@@ -264,7 +313,30 @@ impl PageFrameAllocator {
     fn translate_addr_virt_to_phys(&self, addr: VirtAddr) -> u64 {
         addr.as_u64() - self.phys_memory_offset.as_u64()
     }
-    
+    fn consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<u64> {
+        let mut count = 0;
+        for (idx, frame) in self.usable_frames().enumerate() {
+            if self.is_frame_free(frame) && frame.start_address().as_u64() < max_address {
+                count += 1;
+                if count == needed_frames {
+                    for i in 0..needed_frames {
+                        let frame_to_mark = self.usable_frames().nth((idx as u64 - i) as usize).unwrap();
+                        self.mark_frame_as_used(frame_to_mark);
+                    }
+                    return Some(idx as u64 - needed_frames + 1);
+                }
+            } else {
+                count = 0;
+            }
+        }
+        None
+    }
+    fn allocate_consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<PhysFrame> {
+        if let Some(frame_number) = self.consecutive_frames(needed_frames, max_address) {
+            return Some(PhysFrame::containing_address(PhysAddr::new(frame_number * 4096)));
+        }
+        None
+    }
 }
 
 ///- `allocate_frame`: This method allocates a new frame of memory by returning the next usable frame from the memory map. After each allocation, it increments the `next` index to point to the next usable frame.
@@ -283,8 +355,24 @@ unsafe impl FrameAllocator<Size4KiB> for PageFrameAllocator {
             },
         }
     }
-   }
-pub fn switch_to_kernel_pagetable() {
+}
+
+/**
+When the CPU switches from one process to another, or from user-space to kernel-space, 
+the page tables need to be switched out as well.
+This ensures that the running code (be it a process or the kernel) accesses the correct 
+memory locations in the context of its own virtual address space.
+
+1. kernel_mode():
+This function switches the active page table to the kernel's page table. 
+This is particularly useful when:
+
+The OS is done executing a user-space program and needs to return to kernel mode.
+An interrupt or system call occurs, requiring the CPU to jump from user-space to kernel-space.
+
+When such a transition is made, the kernel needs to see its own memory layout and not the layout of the user-space program. Thus, it "switches" to its own page table using this function.
+*/
+pub fn kernel_mode() {
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
     let phys_addr = (memory_info.kernel_page_tables as *mut PageTable as u64)
         - memory_info.phys_memory_offset.as_u64();
@@ -345,17 +433,109 @@ pub fn free_user_pagetables(level_4_physaddr: u64) {
 
 
 
-pub fn create_user_ondemand_pages(
-    level_4_table_ptr: *mut PageTable,
-    start_addr: VirtAddr,
-    size: u64)
-    -> Result<(), MapToError<Size4KiB>> {
+
+
+
+/// Allocates a consecutive set of frames
+///
+/// start_addr      Starting virtual address in page table
+/// num_frames      Number of consecutive frames
+/// max_physaddr    Maximum physical address
+///                 e.g 32-bit addressable 0xFFFF_FFFF
+pub fn create_sequential_pages(level_4_physaddr: u64,start_addr: VirtAddr,num_frames: u64,max_physaddr: u64)-> Result<PhysAddr, MapToError<Size4KiB>> {
 
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
     let frame_allocator = &mut memory_info.frame_allocator;
 
+    // Try to allocate a consecutive set of frames
+    let start_frame = frame_allocator
+        .allocate_consecutive_frames(num_frames, max_physaddr)
+        .ok_or(MapToError::FrameAllocationFailed)?;
+
+    let frame_range = PhysFrame::range(start_frame, start_frame + num_frames);
+
+    let page_range = {
+        let start_page = Page::containing_address(start_addr);
+        Page::range(start_page, start_page + num_frames)
+    };
+
     let l4_table: &mut PageTable = unsafe {
-                &mut *level_4_table_ptr};
+        &mut *(memory_info.phys_memory_offset
+               + level_4_physaddr).as_mut_ptr()};
+
+    let mut mapper = unsafe {
+        OffsetPageTable::new(l4_table,
+                             memory_info.phys_memory_offset)};
+
+    for (page, frame) in page_range.zip(frame_range) {
+        println!("[!] - Page: {:?} -> Frame: {:?}", page, frame);
+
+        unsafe {
+            mapper.map_to_with_table_flags(page,
+                                           frame,
+                                           // Writeable by user
+                                           PageTableFlags::PRESENT |
+                                           PageTableFlags::WRITABLE |
+                                           PageTableFlags::USER_ACCESSIBLE,
+                                           // Parent table flags include writable
+                                           PageTableFlags::PRESENT |
+                                           PageTableFlags::WRITABLE |
+                                           PageTableFlags::USER_ACCESSIBLE,
+                                           frame_allocator)?.flush()
+        };
+    }
+    Ok(start_frame.start_address())
+}
+const MEMORY_CHUNK_L4_ENTRY: usize = 5;
+const MEMORY_CHUNK_L3_FIRST: usize = 1;
+const MEMORY_CHUNK_L3_LAST: usize = 511;
+
+/// Find the starting address of an available chunk of pages
+///
+/// Returns the index and virtual address of the start of the chunk
+/// or None if no chunks available
+pub fn find_available_page_chunk(level_4_physaddr: u64) -> Option<VirtAddr> {
+
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+
+    let l4_table: &mut PageTable = unsafe {
+        &mut *(memory_info.phys_memory_offset
+               + level_4_physaddr).as_mut_ptr()};
+    let l4_entry = &mut l4_table[MEMORY_CHUNK_L4_ENTRY];
+
+    if l4_entry.is_unused() {
+        // L3 table not allocated -> Create
+        let (_new_table_ptr, new_table_physaddr) = create_pagetable();
+        l4_entry.set_addr(PhysAddr::new(new_table_physaddr),
+                          PageTableFlags::PRESENT |
+                          PageTableFlags::WRITABLE |
+                          PageTableFlags::USER_ACCESSIBLE);
+    }
+    let l3_table: &PageTable = unsafe {
+        & *(memory_info.phys_memory_offset
+            + l4_entry.addr().as_u64()).as_ptr()};
+
+    // Each entry in l3_table from FIRST to LAST inclusive
+    // is a separate chunk
+    for ind in MEMORY_CHUNK_L3_FIRST..=MEMORY_CHUNK_L3_LAST {
+        let entry = &l3_table[ind];
+        if entry.is_unused() {
+            // Found an empty chunk
+            // Convert L4 and L3 index into virtual address
+            return Some(VirtAddr::new(((MEMORY_CHUNK_L4_ENTRY as u64) << 39) |
+                                      (ind << 30) as u64));
+        }
+    }
+    None
+}
+
+
+pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,size: u64)-> Result<(), MapToError<Size4KiB>> {
+
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let frame_allocator = &mut memory_info.frame_allocator;
+
+    let l4_table: &mut PageTable = unsafe {&mut *(memory_info.phys_memory_offset + level_4_table_ptr).as_mut_ptr()};
 
     let mut mapper = unsafe {
         OffsetPageTable::new(l4_table,
@@ -367,11 +547,11 @@ pub fn create_user_ondemand_pages(
         let end_page = Page::containing_address(end_addr);
         Page::range_inclusive(start_page, end_page)
     };
-
-    for page in page_range {
-        let frame = frame_allocator
+    let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
+    for page in page_range {
+        
 
         // Map the frame to the current page
         unsafe {
@@ -387,7 +567,15 @@ pub fn create_user_ondemand_pages(
                 frame_allocator)?.flush()
         };
     }
-
+    // Make one page writable, so this 'owns' the frame
+    unsafe {
+        mapper.update_flags(page_range.start,
+                            PageTableFlags::PRESENT |
+                            PageTableFlags::WRITABLE |
+                            PageTableFlags::USER_ACCESSIBLE)
+            .map_err(|_| MapToError::FrameAllocationFailed)?
+            .flush(); // Update page table
+    }
     Ok(())
 }
 
@@ -497,6 +685,45 @@ pub fn create_user_pagetable() -> *mut PageTable {
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
     let table = unsafe {active_level_4_table(memory_info.phys_memory_offset)};
     table as *mut PageTable
+}
+
+fn active_level_1_table_containing(addr: VirtAddr) -> &'static mut PageTable {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let mut table = unsafe{&mut (*active_pagetable_ptr())};
+
+    for index in [addr.p4_index(),
+                  addr.p3_index(),
+                  addr.p2_index()] {
+
+        let entry = &mut table[index];
+        table = unsafe {&mut *(memory_info.phys_memory_offset
+                               + entry.addr().as_u64()).as_mut_ptr()};
+    }
+    table
+}
+pub fn allocate_missing_ondemand_frame(
+    addr: VirtAddr
+) -> Result<(), &'static str> {
+
+    let table = active_level_1_table_containing(addr);
+    let entry = &mut table[addr.p1_index()];
+
+    if entry.flags() != (PageTableFlags::PRESENT |
+                         PageTableFlags::USER_ACCESSIBLE) {
+        println!("Unexpected flags: {:?} addr: {:?}", entry.flags(), addr);
+        return Err("Error: Unexpected table flags");
+    }
+
+    // Get a new frame and update page table
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let frame = memory_info.frame_allocator.allocate_frame()
+        .ok_or("Could not allocate frame")?;
+
+    entry.set_addr(frame.start_address(),
+                   PageTableFlags::PRESENT |
+                   PageTableFlags::WRITABLE |
+                   PageTableFlags::USER_ACCESSIBLE);
+    Ok(())
 }
 
 

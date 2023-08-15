@@ -5,7 +5,7 @@ use crate::proc::process;
 use crate::boot::gdt;
 use crate::boot::interrupts;
 use crate::boot::interrupts::Context;
-use crate::sync::{Rendezvous,Message, Data};
+use crate::sync::{Socket,Message, Data};
 
 
 // Constants for Model Specific Registers (MSRs) related to syscall handling
@@ -43,45 +43,33 @@ pub const SYSCALL_YEILD: u64 = 5;
 pub fn init() {
     let handler_addr = handle_syscall as *const () as u64;
     unsafe {
-        // Enable System Call Extensions (SCE) to be able to use the
-        // syscall/sysret opcodes by setting the last bit in the MSR
-        // IA32_EFER
+        // Enable System Call Extensions 
         asm!("mov ecx, 0xC0000080",
              "rdmsr",
              "or eax, 1",
              "wrmsr");
 
-        // clear Trap and Interrupt flag on syscall with AMD's
-        // MSR_FMASK register
         asm!("xor rdx, rdx",
              "mov rax, 0x300",
              "wrmsr",
              in("rcx") MSR_FMASK);
 
-        // write handler address to AMD's MSR_LSTAR register
+
         asm!("mov rdx, rax",
              "shr rdx, 32",
              "wrmsr",
              in("rax") handler_addr,
              in("rcx") MSR_LSTAR);
 
-        // write segments to use on syscall/sysret to AMD'S MSR_STAR register
+
         asm!(
             "xor rax, rax",
             "mov rdx, 0x230008", // use seg selectors 8, 16 for syscall and 43, 51 for sysret
             "wrmsr",
             in("rcx") MSR_STAR);
 
-        // Write TSS address into kernel GS MSR
-        //
-        // On a syscall SWAPGS will put this into GS. The layout of
-        // the TSS is here: https://wiki.osdev.org/Task_State_Segment
-        // The first IST slot is at an offset of 0x24 and there are 7
-        // available.
+
         asm!(
-            // Want to move RDX into MSR but wrmsr takes EDX:EAX i.e. EDX
-            // goes to high 32 bits of MSR, and EAX goes to low order bits
-            // https://www.felixcloutier.com/x86/wrmsr
             "mov eax, edx",
             "shr rdx, 32", // Shift high bits into EDX
             "wrmsr",
@@ -188,7 +176,7 @@ extern "C" fn handle_syscall() {
     }
 }
 
-/// Dispatcher function that handles syscalls based on their ID.
+/// Dispatcher function that get_fdescriptor syscalls based on their ID.
 /// It redirects to the appropriate syscall handler function after setting up the execution environment.
 extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64,arg1: u64, arg2: u64, arg3:u64) {
 
@@ -212,12 +200,35 @@ extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64,arg1: 
         2 => sys_write(arg1 as *const u8, arg2 as usize),
         3 => sys_receive(context_ptr, arg1),
         4 => sys_send(context_ptr,syscall_id, arg1, arg2,arg3),
-
-        _ => println!("Unknown syscall {:?} {} {} {}",
-                       context_ptr, syscall_id, arg1, arg2)
+        5 => sys_send(context_ptr,syscall_id, arg1, arg2,arg3),
+        6 => sys_open(context_ptr, arg1 as *const u8, arg2 as usize),
+        9 => sys_yield(context_ptr),
+        _ => println!("Unknown syscall {:?} {} {} {}",context_ptr, syscall_id, arg1, arg2)
     }
 }
-
+pub fn send(fd: u32, value: Message) -> Result<(), u64> {
+    match value {
+        Message::Short(data1, data2, data3) => {
+            let err: u64;
+            unsafe {
+                asm!("syscall",
+                     in("rax") 4 + ((fd as u64) << 32),
+                     in("rdi") data1,
+                     in("rsi") data2,
+                     in("rdx") data3,
+                     lateout("rax") err,
+                     out("rcx") _,
+                     out("r11") _);
+            }
+            println!("err: {}",err);
+            if err == 0 {
+                return Ok(());
+            }
+            Err(err)
+        },
+        _ => return Err(0)
+    }
+}
 /// System call to write a string to the console.
 /// Given a pointer to a string and its size, this syscall prints the string to the console.
 extern "C" fn sys_write(ptr: *const u8, size:usize) {
@@ -244,8 +255,8 @@ fn sys_receive(context_ptr: *mut Context, handle: u64) {
         thread.set_context(context_ptr);
 
 
-        // Get the Rendezvous and call
-        if let Some(rdv) = thread.get_handles(handle) {
+        // Get the Socket and call
+        if let Some(rdv) = thread.get_fdescriptor(handle) {
             let (thread1, thread2) = rdv.write().receive(thread);
             // thread1 should be started asap
             // thread2 should be scheduled
@@ -283,8 +294,8 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
         let current_tid = thread.get_thread_id();
         thread.set_context(context_ptr);
 
-        // Get the Rendezvous and call
-        if let Some(rdv) = thread.get_handles(handle) {
+        // Get the Socket and call
+        if let Some(rdv) = thread.get_fdescriptor(handle) {
             let message = if syscall_id & MESSAGE_LONG == 0 {
                 Message::Short(data1,
                                data2,
@@ -297,8 +308,8 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
                     if syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV {
                         // Moving or copying a handle
                         // First copy, then drop if message is valid
-                        if let Some(rdv) = thread.get_handles(data2) {
-                            Data::Rendezvous(rdv)
+                        if let Some(rdv) = thread.get_fdescriptor(data2) {
+                            Data::Socket(rdv)
                         } else {
                             // Invalid handle
                             thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
@@ -309,8 +320,8 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
                         Data::Value(data2)
                     },
                     if syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV {
-                        if let Some(rdv) = thread.get_handles(data3) {
-                            Data::Rendezvous(rdv)
+                        if let Some(rdv) = thread.get_fdescriptor(data3) {
+                            Data::Socket(rdv)
                         } else {
                             // Invalid handle.
                             // If we moved data2 we would have to put it back here
@@ -321,18 +332,23 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
                     } else {
                         Data::Value(data3)
                     });
-                // Message is valid => Remove handles being moved
+                // Message is valid => Remove get_fdescriptor being moved
                 if (syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV) &&
                     (syscall_id & MESSAGE_DATA2_MOVE != 0) {
-                        let _ = thread.take_rendezvous(data2);
+                        let _ = thread.take_socket(data2);
                     }
                 if (syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV) &&
                     (syscall_id & MESSAGE_DATA3_MOVE != 0) {
-                        let _ = thread.take_rendezvous(data3);
+                        let _ = thread.take_socket(data3);
                     }
                 message
             };
-            let (thread1, thread2) = rdv.write().send_message(Some(thread),message);
+
+            let (thread1, thread2) = match syscall_id & 0xFF {
+                4 => rdv.write().send_message(Some(thread),message),
+                5 => rdv.write().send_receive(thread,message),
+                _ => panic!("Internal error")
+            };
             // thread1 should be started asap
             // thread2 should be scheduled
 
@@ -366,4 +382,32 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
 fn sys_yield(context_ptr: *mut Context) {
     let next_stack = process::schedule_next(context_ptr as usize);
     interrupts::launch_thread(next_stack);
+}
+
+fn sys_open(context_ptr: *mut Context,ptr: *const u8,len: usize) {
+
+    let context = unsafe {&mut (*context_ptr)};
+
+    // Check input length
+    if len == 0 {
+        context.rax = 5;
+        return;
+    }
+    // Convert raw pointer to a slice
+    let u8_slice = unsafe {slice::from_raw_parts(ptr, len)};
+
+    if let Ok(path_string) = str::from_utf8(u8_slice) {
+        match process::open_path(context, &path_string) {
+            Ok(handle) => {
+                context.rax = 0; // No error
+                context.rdi = handle; // Return handle
+            }
+            Err(error_code) => {
+                context.rax = error_code;
+            }
+        }
+    } else {
+        // Bad utf8 conversion
+        context.rax = 6;
+    }
 }
