@@ -6,7 +6,7 @@ use api::{println, syscall, syscall::Message};
 //use core::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
 
 fn recv_id () -> u64 {
-    let thread_id = match syscall::receive(2).unwrap(){ // recv the ID of the thread through the ID_SENDING rendeszvous
+    let thread_id = match syscall::receive(2).unwrap(){ // recv the ID of the thread through the ID_SENDING socket
         Message::Short(value, _, _) => value,
             _ => 0
     };
@@ -14,7 +14,7 @@ fn recv_id () -> u64 {
 }
 
 pub extern "C" fn tester(){
-    //let thread_id = match syscall::receive(2).unwrap(){ // recv the ID of the thread through the ID_SENDING rendeszvous
+    //let thread_id = match syscall::receive(2).unwrap(){ // recv the ID of the thread through the ID_SENDING socket
     //    Message::Short(value, _, _) => value,
     //        _ => 0
     //};
