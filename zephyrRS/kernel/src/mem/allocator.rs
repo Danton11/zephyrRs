@@ -30,9 +30,12 @@ pub fn init_heap(mapper: &mut impl Mapper<Size4KiB>,frame_allocator: &mut impl F
     };
 
     // map all pages in the page range to a present and writable page using the FrameAllocator
+    //serial_println!("{:?}", pages);
     for page in pages {
         let frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?; // create a physical page to be mapped to 
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // set the flags for the page
+
+        //serial_println!("{:?} - {:?}",frame, flags);
         unsafe { mapper.map_to(page, frame, flags, frame_allocator)?.flush() }; // create mapping from physical to virtual
                                                                                 
     }
