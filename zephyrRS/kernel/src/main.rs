@@ -31,7 +31,7 @@ entry_point!(kernel_main);
 fn kernel_thread_main() {
     let keyboard_listener = interrupts::keyboard_socket();
     let vga_listener = vga_buffer::start_listener();
-    let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone()];
+    let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone(), kernel::FIN_SOCKET.clone()]; // list of listeners for a process to have
     let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
 
     let proc_id = match proc {
@@ -41,9 +41,10 @@ fn kernel_thread_main() {
             return; // or handle the error in another way
         }
     };
+     
     kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
     //process::spawn_user_thread(include_bytes!("../../user/shell"),process::Params{handles: Vec::from([Arc::new(RwLock::new(Socket::Empty)),vga_listener]),mounts: Arc::new(RwLock::new(Vec::from([(String::from("/bin"), keyboard_listener)])))});
-
+ 
 
     kernel::hlt_loop();
 }

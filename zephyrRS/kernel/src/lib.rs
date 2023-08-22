@@ -32,6 +32,11 @@ lazy_static! {
         Arc::new(RwLock::new(Socket::Empty));
 }
 
+lazy_static! {
+    pub static ref FIN_SOCKET: Arc<RwLock<Socket>> =
+        Arc::new(RwLock::new(Socket::Empty));
+}
+
 
 //init interrupt handler
 pub fn init() {

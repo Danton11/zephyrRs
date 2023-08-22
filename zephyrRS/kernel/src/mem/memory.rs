@@ -531,15 +531,12 @@ pub fn find_available_page_chunk(level_4_physaddr: u64) -> Option<VirtAddr> {
 
 
 pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,size: u64)-> Result<(), MapToError<Size4KiB>> {
-
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
     let frame_allocator = &mut memory_info.frame_allocator;
 
     let l4_table: &mut PageTable = unsafe {&mut *(memory_info.phys_memory_offset + level_4_table_ptr).as_mut_ptr()};
 
-    let mut mapper = unsafe {
-        OffsetPageTable::new(l4_table,
-                             memory_info.phys_memory_offset)};
+    let mut mapper = unsafe {OffsetPageTable::new(l4_table,memory_info.phys_memory_offset)};
 
     let page_range = {
         let end_addr = start_addr + size - 1u64;
@@ -547,12 +544,12 @@ pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,si
         let end_page = Page::containing_address(end_addr);
         Page::range_inclusive(start_page, end_page)
     };
+
     let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
-    for page in page_range {
-        
 
+    for page in page_range {
         // Map the frame to the current page
         unsafe {
             mapper.map_to_with_table_flags(
@@ -580,7 +577,6 @@ pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,si
 }
 
 pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), &'static str> {
-  
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
     let mut table = unsafe {&mut *level_4_table};
@@ -594,8 +590,7 @@ pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), 
                            PageTableFlags::WRITABLE |
                            PageTableFlags::USER_ACCESSIBLE);
         }
-        table = unsafe {&mut *(memory_info.phys_memory_offset
-                               + entry.addr().as_u64()).as_mut_ptr()};
+        table = unsafe {&mut *(memory_info.phys_memory_offset + entry.addr().as_u64()).as_mut_ptr()};
     }
 
     // Table should now be the level 1 page table
@@ -608,17 +603,20 @@ pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), 
     // sequentially from there. For now just use process::unique_id
     use crate::proc::process;
     let n_start = process::unique_id(); // Modulo 64 soon
+    //
+    const N: usize = 10;
+
     for i in 0..64 {
         let n = ((n_start + i) % 64) as usize;
 
-        if table[n * 8 + 1].is_unused() {
+        if (n * 8 + 1..n * 8 + 1 + N).all(|index| table[index].is_unused()) {
             // Found an empty slot:
             //  [n * 8] -> Empty (guard)
             //  [n * 8 + 1] -> User stack
             //      ...
             //  [n * 8 + 7] -> User stack
 
-            for j in 1..8 {
+            for j in 1..=N {
                 // Allocate user stack frames
                 let entry = &mut table[n * 8 + j];
 
@@ -637,7 +635,7 @@ pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), 
                 ((THREAD_STACK_PAGE_INDEX[2] as u64) << 21) +
                 (((n * 8) as u64) << 12);
 
-            return Ok((slot_address + 4096, slot_address + 8 * 4096)); // User stack
+            return Ok((slot_address + 4096, slot_address + ((N+1) as u64) * 4096));
         }
     }
 
@@ -701,9 +699,7 @@ fn active_level_1_table_containing(addr: VirtAddr) -> &'static mut PageTable {
     }
     table
 }
-pub fn allocate_missing_ondemand_frame(
-    addr: VirtAddr
-) -> Result<(), &'static str> {
+pub fn allocate_missing_ondemand_frame(addr: VirtAddr) -> Result<(), &'static str> {
 
     let table = active_level_1_table_containing(addr);
     let entry = &mut table[addr.p1_index()];
@@ -773,6 +769,7 @@ pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
     let start_page: Page<Size4KiB> = Page::containing_address(stack_start);
     let end_page = Page::containing_address(stack_end);
 
+    serial_println!("Trying to remove pages from {:?} - {:?}", start_page,end_page);
     // Iterate over all pages in the stack
     for page in Page::range_inclusive(start_page, end_page) {
         // Unmap the page

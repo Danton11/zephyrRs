@@ -1,0 +1,160 @@
+cargo build --release --bin bin
+mkdir -p user
+cp target/x86_64-zephyr/release/bin user/
+cargo build --release --bin shell
+mkdir -p user
+cp target/x86_64-zephyr/release/shell user/
+cargo run --release --bin kernel
+Building bootloader
+Running: `qemu-system-x86_64 -drive format=raw,file=target/x86_64-zephyr/release/bootimage-kernel.bin -serial stdio -vga virtio`
+
+
+[] - Setting up ZephyrRS!
+[] - Successfully initialised Kernel
+-----------------------------------------Memory Layout --------------------------------------
+Region Type          Start Address        End Address          Size (bytes)   
+---------------------------------------------------------------------------------------------
+FrameZero                0x0                  0x1000               4096           
+PageTable                0x1000               0x5000               16384          
+Bootloader                0x5000               0x16000              69632          
+BootInfo                0x16000              0x17000              4096           
+Kernel                0x17000              0x1E000              28672          
+KernelStack                0x1E000              0x9F000              528384         
+Reserved                0x9F000              0xA0000              4096           
+Reserved                0xF0000              0x100000             65536          
+KernelStack                0x100000             0x27F000             1568768        
+Usable                0x27F000             0x400000             1576960        
+Kernel                0x400000             0x449000             299008         
+PageTable                0x449000             0x457000             57344          
+Usable                0x457000             0x7FE0000            129536000      
+Reserved                0x7FE0000            0x8000000            131072         
+Reserved                0xFFFC0000           0x100000000          262144         
+-------------------------------------------------------------------------------
+Total Memory Size: 134152192
+-------------------------------------------------------------------------------
+[] - Initialised Heap...
+---------------- Thread Details ----------------
+Thread ID:              1
+Thread Type:            Kernel
+RIP:                    0x00000000401630
+Kernel Stack  0x00444444440000 - 0x00444444443000: (12288 bytes)
+Context Address:        0x00444444442F60
+Thread Stack 0x00444444443000 - 0x0044444444D000 (40960 bytes)
+RSP:                    0x0044444444D000
+-----------------------------------------------
+---------------- Thread Details ----------------
+Thread ID:              2
+Thread Type:            Kernel
+RIP:                    0x00000000413430
+Kernel Stack  0x0044444444D280 - 0x00444444450280: (12288 bytes)
+Context Address:        0x004444444501E0
+Thread Stack 0x00444444450280 - 0x0044444445A280 (40960 bytes)
+RSP:                    0x0044444445A280
+-----------------------------------------------
+Thread allocated page table at physical address 0x2cd000
+Thread 3 allocated user stack from 0x28000021000 to 0x2800002b000
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 0 bytes
+---------------- Thread Details ----------------
+Thread ID:              3
+Thread Type:            User
+RIP:                    0x00000005002170
+Kernel Stack  0x0044444445A580 - 0x0044444445D580: (12288 bytes)
+Context Address:        0x0044444445D4E0
+Thread Stack 0x00028000021000 - 0x0002800002B000 (40960 bytes)
+RSP:                    0x0002800002B000
+-----------------------------------------------
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 0 bytes
+---------------- Thread Details ----------------
+Thread ID:              6
+Thread Type:            User
+RIP:                    0x00000005001DBD
+Kernel Stack  0x0044444445D600 - 0x00444444460600: (12288 bytes)
+Context Address:        0x00444444460560
+Thread Stack 0x00028000031000 - 0x0002800003B000 (40960 bytes)
+RSP:                    0x0002800003B000
+-----------------------------------------------
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 0 bytes
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 232 bytes
+[!] - Scheduling thread 3: Using page table at 0x2cd000 and kernel stack at 0x44444445d580
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 0 bytes
+---------------- Thread Details ----------------
+Thread ID:              8
+Thread Type:            User
+RIP:                    0x00000005001DBD
+Kernel Stack  0x00444444460600 - 0x00444444463600: (12288 bytes)
+Context Address:        0x00444444463560
+Thread Stack 0x00028000041000 - 0x0002800004B000 (40960 bytes)
+RSP:                    0x0002800004B000
+-----------------------------------------------
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 0 bytes
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 160 bytes
+[!] - Scheduling thread 6: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 0 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[!] - Scheduling thread 8: Using page table at 0x2cd000 and kernel stack at 0x444444463600
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 160 bytes
+[!] - Scheduling thread 6: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[!] - Scheduling thread 8: Using page table at 0x2cd000 and kernel stack at 0x444444463600
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 160 bytes
+[!] - Scheduling thread 6: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[!] - Scheduling thread 8: Using page table at 0x2cd000 and kernel stack at 0x444444463600
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 160 bytes
+[!] - Scheduling thread 6: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[!] - Scheduling thread 8: Using page table at 0x2cd000 and kernel stack at 0x444444463600
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 160 bytes
+[!] - Scheduling thread 6: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[!] - Scheduling thread 8: Using page table at 0x2cd000 and kernel stack at 0x444444463600
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 0 bytes
+Trying to remove pages from Page[4KiB](0x28000033000) - Page[4KiB](0x2800003b000)
+[STACK_MONITOR][USER][Thread 6] Stack Usage: 0 bytes
+[!] - Thread 6 deallocated user stack at 0x2800003b000
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 232 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 0 bytes
+Trying to remove pages from Page[4KiB](0x28000043000) - Page[4KiB](0x2800004b000)
+[STACK_MONITOR][USER][Thread 8] Stack Usage: 0 bytes
+[!] - Thread 8 deallocated user stack at 0x2800004b000
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 232 bytes
+---------------- Thread Details ----------------
+Thread ID:              10
+Thread Type:            User
+RIP:                    0x00000005001DBD
+Kernel Stack  0x0044444445D600 - 0x00444444460600: (12288 bytes)
+Context Address:        0x00444444460560
+Thread Stack 0x00028000051000 - 0x0002800005B000 (40960 bytes)
+RSP:                    0x0002800005B000
+-----------------------------------------------
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 0 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 0 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[!] - Scheduling thread 10: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[!] - Scheduling thread 10: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[!] - Scheduling thread 10: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[!] - Scheduling thread 10: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[!] - Scheduling thread 10: Using page table at 0x2cd000 and kernel stack at 0x444444460600
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 160 bytes
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 0 bytes
+Trying to remove pages from Page[4KiB](0x28000053000) - Page[4KiB](0x2800005b000)
+[STACK_MONITOR][USER][Thread 10] Stack Usage: 0 bytes
+[!] - Thread 10 deallocated user stack at 0x2800005b000
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 232 bytes
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 8 bytes
+Trying to remove pages from Page[4KiB](0x28000023000) - Page[4KiB](0x2800002b000)
+[STACK_MONITOR][USER][Thread 3] Stack Usage: 8 bytes
+[!] - Thread 3 deallocated user stack at 0x2800002b000
