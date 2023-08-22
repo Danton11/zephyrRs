@@ -213,16 +213,45 @@ Uses the memory map provided by the bootloader to determine which frames are usa
 Contains functions like allocate_frame, deallocate_frame, usable_frames, etc., to manage frames.
 */
 
+// Maximum number of levels supported. The maximum number of frames
+/// is 32^levels, so 6 levels can keep track of 4Tb of 4k frames.
+const FRAME_ALLOCATOR_MAX_LEVELS: usize = 6;
+
+/// Size of the stack of available frames
+/// Note: Must be >= bitmap chunk size (32)
+const FRAME_ALLOCATOR_STACK_SIZE: usize = 32;
+
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct PageFrameAllocator {
-    memory_map: &'static MemoryMap,
-    next: usize, 
-    frame_usage: [bool;  100000],
-    phys_memory_offset: VirtAddr,
+    /// Virtual address of the first level 2 entry
+    /// Each entry is 32 bits long, one bit per level-1 entry
+    bitmap_virt_addr: [VirtAddr; FRAME_ALLOCATOR_MAX_LEVELS],
+    
+    nframes: u64,
+
+    /// Number of levels
+    nlevels: usize,
+
+    /// Physical start address of the frames
+    frame_phys_addr: PhysAddr,
+
+    /// Stack of up to FRAME_ALLOCATOR_STACK_SIZE frames
+    frame_stack: [u64; FRAME_ALLOCATOR_STACK_SIZE],
+    frame_stack_number: usize,
 }
 
 ///- `BootInfoFrameAllocator`: This frame allocator uses the memory map provided by the bootloader to track which frames are available for allocation. It filters out all memory regions that are marked as `USABLE` and provides an iterator over all usable frames. Each time a frame is allocated, it increments the `next` index to keep track of the next frame to allocate.
 
+fn nonzero_bit_index(bitmap: u32) -> u32 {
+    let index: u32;
+    unsafe {
+        asm!("bsf eax, ecx",
+             in("ecx") bitmap,
+             lateout("eax") index,
+             options(pure, nomem, nostack));
+    }
+    index
+}
 
 impl PageFrameAllocator {
     ///- `init`: This method initializes the `BootInfoFrameAllocator`. It is marked as `unsafe` because the caller must ensure that the provided memory map is correct.
@@ -232,131 +261,357 @@ impl PageFrameAllocator {
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
     pub unsafe fn init(memory_map: &'static MemoryMap, phys_memory_offset: VirtAddr ) -> Self {
-        let _frame_count = memory_map.iter().count();
-        //println!("num of entries: {}", frame_count);
-        PageFrameAllocator {
-            memory_map,
-            next: 0,
-            frame_usage: [false; 100000],
-            phys_memory_offset
-        }
-    }
-    pub fn total_frames(&self) -> usize {
-    // get usable regions from memory map
-    let regions = self.memory_map.iter();
-    let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-    // sum up the size of each region and divide by the size of a frame to get the number of frames
-    let total_frames: usize = usable_regions
-        .map(|r| (r.range.end_addr() - r.range.start_addr()) as usize / 4096)
-        .sum();
-    total_frames
-}
-    /// Returns the total size of usable memory.
-
-    pub fn total_usable_size(&self) -> u64 {
-        let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-        let total: u64 = usable_regions.map(|r| r.range.end_addr() - r.range.start_addr()).sum();
-        total
-    }
-
-
-    fn mark_frame_as_used(&mut self, frame: PhysFrame) {
-        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
-        self.frame_usage[frame_num] = true; // mark frame as used
-    }
-
-
-
-
-    fn is_frame_free(&self, frame: PhysFrame) -> bool {
-        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
-        !self.frame_usage[frame_num] // return true if frame is free
-    }
-
-    ///- `usable_frames`: This method returns an iterator over all frames marked as `USABLE` in the memory map. It does this by iterating over all regions in the memory map, filtering out regions not marked as `USABLE`, and then converting each region's address range to a list of frame addresses.
-    /// Returns an iterator over the usable frames specified in the memory map.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         // get usable regions from memory map
-        let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-        // map each region to its address range
-        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
-        // transform to an iterator of frame start addresses
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        // create `PhysFrame` types from the start addresses
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+        let mut usable_regions = memory_map
+            .iter()
+            .filter(|r| r.region_type == MemoryRegionType::Usable);
+
+        _ = usable_regions.next(); // Discard the first region
+        let region = usable_regions.next().unwrap();
+
+        let start_addr = region.range.start_addr();
+        let end_addr = region.range.end_addr();
+        let nframes = region.range.end_frame_number - region.range.start_frame_number;
+        let nlevels = num_levels_needed(nframes);
+
+        let mut bitmap_virt_addr = [VirtAddr::new(0); FRAME_ALLOCATOR_MAX_LEVELS];
+        let mut level_start_addr = start_addr;
+        let mut nbits = nframes; // Number of bits needed at each level
+        for level in 0..nlevels {
+            bitmap_virt_addr[level] = phys_memory_offset + level_start_addr;
+            let level_ptr = bitmap_virt_addr[level].as_mut_ptr() as *mut u32;
+
+            let num_full_chunks = nbits >> 5;
+            for i in 0..num_full_chunks {
+                *(level_ptr.offset(i as isize)) = 0xFFFF_FFFF;
+            }
+
+            // May need final part-filled chunk
+            let num_extra_bits = nbits & 31;
+            if num_extra_bits > 0 {
+                // Fill with ones, then shift to zero missing frames
+                // note: Missing frames correspond to high bits so shift right
+                *(level_ptr.offset(num_full_chunks as isize)) =
+                    0xFFFF_FFFF >> (32 - num_extra_bits);
+            }
+
+            // Total number of chunks i.e. bits at next level
+            nbits = num_full_chunks + if num_extra_bits > 0 {1} else {0};
+
+            // Start address of the next level
+            level_start_addr += nbits * 4u64;
+        }
+        // Number of bytes needed to store all bitmaps
+        let bitmap_size_bytes = level_start_addr - start_addr;
+        // Round up number of frames needed by adding 4095 and dividing by 4096
+        let bitmap_size_frames = (bitmap_size_bytes + 4095) >> 12;
+
+        serial_println!("Region: {:#016X} - {:#016X}", start_addr, end_addr);
+        serial_println!("Frames: {} Levels: {} Reserved frames: {}",
+                 nframes, nlevels, bitmap_size_frames);
+
+        // Mark frames where bitmaps are stored as used
+        // - Clear low bits in bitmaps corresponding to the used frames
+        // - May need to clear multiple chunks and levels if the
+        //   bitmap fills more than one chunk (32 frames).
+        let mut nbits = bitmap_size_frames; // Number of bits to clear
+        for level in 0..nlevels {
+            let ptr = bitmap_virt_addr[level].as_mut_ptr() as *mut u32;
+
+            let num_full_chunks = nbits >> 5;
+            for i in 0..num_full_chunks {
+                *(ptr.offset(i as isize)) = 0; // Clear
+            }
+
+            // May need to clear part of a chunk
+            // Note: Clearing low bits so shift left
+            let num_extra_bits = nbits & 31;
+            if num_extra_bits > 0 {
+                *(ptr.offset(num_full_chunks as isize)) =
+                    (0xFFFF_FFFF << num_extra_bits) & 0xFFFF_FFFF;
+            }
+
+            if num_full_chunks == 0 {
+                break; // Don't need to clear higher bitmaps
+            }
+            nbits = num_full_chunks; // Clear these bits at higher level
+        }
+
+        PageFrameAllocator {
+            bitmap_virt_addr,
+            nframes,
+            nlevels,
+            frame_phys_addr: PhysAddr::new(start_addr),
+            frame_stack: [0; FRAME_ALLOCATOR_STACK_SIZE],
+            frame_stack_number: 0
+        }    
+
+    }
+
+    /// Allocate a frame, returning the frame number in this
+    /// allocation region.
+    fn fetch_frame(&mut self) -> Option<u64> {
+        if self.frame_stack_number == 0 {
+            // Empty stack => Find more frames
+
+            let mut chunk_number: u64 = 0;
+            for level in (1..self.nlevels).rev() {
+                let ptr = self.bitmap_virt_addr[level].as_ptr() as *const u32;
+                let bitmap = unsafe{*(ptr.offset(chunk_number as isize))};
+                if bitmap == 0 {
+                    return None; // Out of memory
+                }
+                chunk_number = chunk_number * 32
+                    + nonzero_bit_index(bitmap) as u64;
+            }
+
+            // Get bitmap containing frame indices
+            let ptr = self.bitmap_virt_addr[0].as_mut_ptr() as *mut u32;
+            let mut bitmap = unsafe{*(ptr.offset(chunk_number as isize))};
+
+            // Take all frames and put them on the stack
+            while bitmap != 0 {
+                let index = nonzero_bit_index(bitmap);
+                let frame_number = chunk_number * 32 + index as u64;
+                bitmap ^= 1 << index;
+                self.frame_stack[self.frame_stack_number] = frame_number;
+                self.frame_stack_number += 1;
+            }
+            unsafe{*ptr = 0} // Chunk now empty
+
+            // Clear higher bitmaps if the chunk is empty
+            for level in 1..self.nlevels {
+                let ptr = unsafe{(self.bitmap_virt_addr[level].as_mut_ptr() as *mut u32)
+                                 .offset(chunk_number as isize)};
+                let mut bitmap = unsafe{*ptr};
+                let index = chunk_number & 31; // Low bits are the index
+
+                bitmap &= !(1 << index); // clear bit
+                unsafe{*ptr = bitmap};
+
+                if bitmap != 0 {
+                    // This chunk still has frames => stop clearing
+                    break;
+                }
+
+                // Divide by 32 to get chunk number of higher level
+                chunk_number = chunk_number >> 5;
+            }
+        }
+
+        if self.frame_stack_number == 0 {
+            panic!("Stack still empty!") // bug!
+        }
+        // Stack now contains frames
+        self.frame_stack_number -= 1;
+        Some(self.frame_stack[self.frame_stack_number])
+    }
+
+    /// Put a frame back into the bitmap
+    ///
+    /// Input is the frame number returned by fetch_frame, not
+    /// a physical address
+    fn return_frame(&mut self, frame_number: u64) {
+        if self.frame_stack_number < FRAME_ALLOCATOR_STACK_SIZE {
+            self.frame_stack[self.frame_stack_number] = frame_number;
+            self.frame_stack_number += 1;
+            return;
+        }
+
+        // Calculate indices
+        let mut chunk_number = frame_number;
+        for level in 0..self.nlevels {
+            let ptr = unsafe{(self.bitmap_virt_addr[level].as_mut_ptr() as *mut u32)
+                             .offset(chunk_number as isize)};
+            let bitmap_was_empty = unsafe{*ptr} == 0;
+            let index = chunk_number & 31; // Low 5 bits are the index
+
+            // Set bit
+            unsafe{*ptr |= 1 << index;}
+
+            if !bitmap_was_empty {
+                // No need to change higher bitmaps
+                break;
+            }
+            // Divide by 32 to get chunk number of higher level
+            chunk_number = chunk_number >> 5;
+        }
     }
 
     fn deallocate_frame(&mut self, frame: PhysFrame) {
-        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
-        self.frame_usage[frame_num] = false; // mark frame as free
-
-        // zero out the frame
-        let size = 4096; // size of a page/frame
-        let addr = frame.start_address().as_u64();
-        let virt_addr = self.translate_addr_phys_to_virt(addr);
-
-        // convert the virtual address to a raw pointer
-        let ptr: *mut u8 = virt_addr.as_mut_ptr();
-        unsafe {
-            core::ptr::write_bytes(ptr, 0, size);
-        }
+        let frame_number = (frame.start_address() - self.frame_phys_addr) / 4096;
+        self.return_frame(frame_number);
     }
 
-    // method to translate a physical address to a virtual one
-    fn translate_addr_phys_to_virt(&self, addr: u64) -> VirtAddr {
-        self.phys_memory_offset + addr
-    }
+//    pub fn total_frames(&self) -> usize {
+//    // get usable regions from memory map
+//    let regions = self.memory_map.iter();
+//    let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+//    // sum up the size of each region and divide by the size of a frame to get the number of frames
+//    let total_frames: usize = usable_regions
+//        .map(|r| (r.range.end_addr() - r.range.start_addr()) as usize / 4096)
+//        .sum();
+//    total_frames
+//}
+//    /// Returns the total size of usable memory.
+//
+//    pub fn total_usable_size(&self) -> u64 {
+//        let regions = self.memory_map.iter();
+//        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+//        let total: u64 = usable_regions.map(|r| r.range.end_addr() - r.range.start_addr()).sum();
+//        total
+//    }
+//
+//
+//    fn mark_frame_as_used(&mut self, frame: PhysFrame) {
+//        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+//        self.frame_usage[frame_num] = true; // mark frame as used
+//    }
+//
+//
+//
+//
+//    fn is_frame_free(&self, frame: PhysFrame) -> bool {
+//        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+//        !self.frame_usage[frame_num] // return true if frame is free
+//    }
+//
+//    ///- `usable_frames`: This method returns an iterator over all frames marked as `USABLE` in the memory map. It does this by iterating over all regions in the memory map, filtering out regions not marked as `USABLE`, and then converting each region's address range to a list of frame addresses.
+//    /// Returns an iterator over the usable frames specified in the memory map.
+//    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+//        // get usable regions from memory map
+//        let regions = self.memory_map.iter();
+//        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+//        // map each region to its address range
+//        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
+//        // transform to an iterator of frame start addresses
+//        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
+//        // create `PhysFrame` types from the start addresses
+//        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+//    }
+//
+//    fn deallocate_frame(&mut self, frame: PhysFrame) {
+//        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
+//        self.frame_usage[frame_num] = false; // mark frame as free
+//
+//        // zero out the frame
+//        let size = 4096; // size of a page/frame
+//        let addr = frame.start_address().as_u64();
+//        let virt_addr = self.translate_addr_phys_to_virt(addr);
+//
+//        // convert the virtual address to a raw pointer
+//        let ptr: *mut u8 = virt_addr.as_mut_ptr();
+//        unsafe {
+//            core::ptr::write_bytes(ptr, 0, size);
+//        }
+//    }
+//
+//    // method to translate a physical address to a virtual one
+//    fn translate_addr_phys_to_virt(&self, addr: u64) -> VirtAddr {
+//        self.phys_memory_offset + addr
+//    }
+//
+//    // method to translate a virtual address to a physical one
+//    fn translate_addr_virt_to_phys(&self, addr: VirtAddr) -> u64 {
+//        addr.as_u64() - self.phys_memory_offset.as_u64()
+//    }
+    //
+    //
 
-    // method to translate a virtual address to a physical one
-    fn translate_addr_virt_to_phys(&self, addr: VirtAddr) -> u64 {
-        addr.as_u64() - self.phys_memory_offset.as_u64()
-    }
     fn consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<u64> {
-        let mut count = 0;
-        for (idx, frame) in self.usable_frames().enumerate() {
-            if self.is_frame_free(frame) && frame.start_address().as_u64() < max_address {
-                count += 1;
-                if count == needed_frames {
-                    for i in 0..needed_frames {
-                        let frame_to_mark = self.usable_frames().nth((idx as u64 - i) as usize).unwrap();
-                        self.mark_frame_as_used(frame_to_mark);
+        // Ensure that there is at least one frame in range
+        if max_address < (self.frame_phys_addr.as_u64() + 4095) {
+            return None;
+        }
+
+        // Restrict the number of frames to those under the address limit
+        let max_frames = (max_address + 1 - self.frame_phys_addr.as_u64()) >> 12;
+        let nframes = if max_frames < self.nframes {max_frames} else {self.nframes};
+
+        // Number of 32-bit chunks to search
+        let nchunks = (nframes >> 5) + if nframes & 31 != 0 {1} else {0};
+
+        // Pointer to lowest level frame bitmap
+        let ptr = self.bitmap_virt_addr[0].as_mut_ptr() as *mut u32;
+
+        let mut count = 0; // How many consecutive frames found so far?
+        for chunk in 0..nchunks {
+            let bitmap = unsafe{*ptr.offset(chunk as isize)};
+
+            for pos in 0..32 {
+                if bitmap & (1 << pos) == 0 {
+                    // Not available
+                    count = 0;
+                } else {
+                    // Available frame
+                    count += 1;
+                    if count == needed_frames {
+                        // Found a consecutive set of frames
+                        let start_frame = (chunk << 5) + pos + 1 - count;
+
+                        // Mark each frame as taken
+                        for frame in start_frame..(start_frame + needed_frames) {
+                            let mut chunk_number = frame;
+
+                            // Clear higher bitmaps if the chunk is empty
+                            for level in 0..self.nlevels {
+                                // Low 5 bits of the chunk at the lower level are the index at this level
+                                let index = chunk_number & 31;
+                                // High bits are the chunk at this level
+                                chunk_number = chunk_number >> 5;
+
+                                let ptr = unsafe{(self.bitmap_virt_addr[level].as_mut_ptr() as *mut u32)
+                                                 .offset(chunk_number as isize)};
+                                let mut bitmap = unsafe{*ptr};
+
+                                bitmap &= !(1 << index); // clear bit
+                                unsafe {core::ptr::write(ptr, bitmap)};
+
+                                if bitmap != 0 {
+                                    // This chunk still has frames => stop clearing
+                                    break;
+                                }
+                            }
+                        }
+                        return Some(start_frame);
                     }
-                    return Some(idx as u64 - needed_frames + 1);
                 }
-            } else {
-                count = 0;
             }
         }
+        // Not found
         None
     }
     fn allocate_consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<PhysFrame> {
         if let Some(frame_number) = self.consecutive_frames(needed_frames, max_address) {
-            return Some(PhysFrame::containing_address(PhysAddr::new(frame_number * 4096)));
+            // Convert from frame number to physical address
+            return PhysFrame::from_start_address(self.frame_phys_addr + frame_number * 4096).ok();
         }
         None
     }
 }
 
+
 ///- `allocate_frame`: This method allocates a new frame of memory by returning the next usable frame from the memory map. After each allocation, it increments the `next` index to point to the next usable frame.
 unsafe impl FrameAllocator<Size4KiB> for PageFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        match frame {
-            Some(frame) if self.is_frame_free(frame) => {
-                self.mark_frame_as_used(frame);
-                self.next += 1;
-                Some(frame)
-            }
-            _ => { 
-                serial_println!("no free frames...");
-                None 
-            },
+        if let Some(frame_number) = self.fetch_frame() {
+            // Convert from frame number to physical address
+            return PhysFrame::from_start_address(
+                self.frame_phys_addr + frame_number * 4096).ok();
         }
+        None
     }
 }
+fn num_levels_needed(num_frames: u64) -> usize {
+    let mut max_frames = 32;
+    let mut levels = 1;
 
+    while num_frames > max_frames {
+        levels += 1;
+        max_frames *= 32;
+    }
+    levels
+}
 /**
 When the CPU switches from one process to another, or from user-space to kernel-space, 
 the page tables need to be switched out as well.
@@ -399,9 +654,7 @@ pub fn free_user_pagetables(level_4_physaddr: u64) {
                       frame_allocator: &mut PageFrameAllocator,
                       table_physaddr: PhysAddr,
                       level: u16) {
-        let table = unsafe{&mut *(physical_memory_offset
-                                  + table_physaddr.as_u64())
-                           .as_mut_ptr() as &mut PageTable};
+        let table = unsafe{&mut *(physical_memory_offset+ table_physaddr.as_u64()).as_mut_ptr() as &mut PageTable};
         for entry in table.iter() {
             if !entry.is_unused() {
                 if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
@@ -531,11 +784,11 @@ pub fn find_available_page_chunk(level_4_physaddr: u64) -> Option<VirtAddr> {
 
 
 pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,size: u64)-> Result<(), MapToError<Size4KiB>> {
-
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
     let frame_allocator = &mut memory_info.frame_allocator;
 
-    let l4_table: &mut PageTable = unsafe {&mut *(memory_info.phys_memory_offset + level_4_table_ptr).as_mut_ptr()};
+    let l4_table: &mut PageTable = unsafe {
+                &mut *(memory_info.phys_memory_offset+ level_4_table_ptr).as_mut_ptr()};
 
     let mut mapper = unsafe {
         OffsetPageTable::new(l4_table,
@@ -547,40 +800,40 @@ pub fn create_user_ondemand_pages(level_4_table_ptr: u64,start_addr: VirtAddr,si
         let end_page = Page::containing_address(end_addr);
         Page::range_inclusive(start_page, end_page)
     };
-    let frame = frame_allocator
-            .allocate_frame()
-            .ok_or(MapToError::FrameAllocationFailed)?;
-    for page in page_range {
-        
 
-        // Map the frame to the current page
+    // Only allocating one frame
+    let frame = frame_allocator
+        .allocate_frame()
+        .ok_or(MapToError::FrameAllocationFailed)?;
+
+    for page in page_range {
         unsafe {
-            mapper.map_to_with_table_flags(
-                page,
-                frame,
-                PageTableFlags::PRESENT |
-                PageTableFlags::WRITABLE |
-                PageTableFlags::USER_ACCESSIBLE,
-                PageTableFlags::PRESENT |
-                PageTableFlags::WRITABLE |
-                PageTableFlags::USER_ACCESSIBLE,
-                frame_allocator)?.flush()
+            mapper.map_to_with_table_flags(page,
+                                           frame,
+                                           // Page not writable
+                                           PageTableFlags::PRESENT |
+                                           PageTableFlags::USER_ACCESSIBLE,
+                                           // Parent table flags include writable
+                                           PageTableFlags::PRESENT |
+                                           PageTableFlags::WRITABLE |
+                                           PageTableFlags::USER_ACCESSIBLE,
+                                           frame_allocator)?.flush()
         };
     }
+
     // Make one page writable, so this 'owns' the frame
     unsafe {
         mapper.update_flags(page_range.start,
                             PageTableFlags::PRESENT |
                             PageTableFlags::WRITABLE |
-                            PageTableFlags::USER_ACCESSIBLE)
-            .map_err(|_| MapToError::FrameAllocationFailed)?
-            .flush(); // Update page table
+                            PageTableFlags::USER_ACCESSIBLE);
     }
+
     Ok(())
 }
 
 pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), &'static str> {
-  
+
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
     let mut table = unsafe {&mut *level_4_table};
@@ -614,37 +867,58 @@ pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), 
         if table[n * 8 + 1].is_unused() {
             // Found an empty slot:
             //  [n * 8] -> Empty (guard)
-            //  [n * 8 + 1] -> User stack
+            //  [n * 8 + 1] -> User stack (read-only)
             //      ...
-            //  [n * 8 + 7] -> User stack
+            //  [n * 8 + 7] -> User stack (writable)
 
-            for j in 1..8 {
-                // Allocate user stack frames
-                let entry = &mut table[n * 8 + j];
-
-                let frame = memory_info.frame_allocator.allocate_frame()
+            // Note: Only one frame is going to be allocated, and the rest
+            //       are going to be read-only references to the same frame.
+            //       When a thread tries to write to them a page fault will
+            //       be triggered and the frame allocated.
+            let frame = memory_info.frame_allocator.allocate_frame()
                     .ok_or("Failed to allocate frame")?;
 
+            for j in 1..7 {
+                // These pages are read-only
+                let entry = &mut table[n * 8 + j];
                 entry.set_addr(frame.start_address(),
                                PageTableFlags::PRESENT |
-                               PageTableFlags::WRITABLE |
                                PageTableFlags::USER_ACCESSIBLE);
             }
+            let entry = &mut table[n * 8 + 7];
+            entry.set_addr(frame.start_address(),
+                           PageTableFlags::PRESENT |
+                           PageTableFlags::WRITABLE | // Note!
+                           PageTableFlags::USER_ACCESSIBLE);
 
             // Return the virtual addresses of the top of the kernel and user stacks
-            let slot_address: u64 = ((THREAD_STACK_PAGE_INDEX[0] as u64) << 39) +
+            let slot_address: u64 =
+                ((THREAD_STACK_PAGE_INDEX[0] as u64) << 39) +
                 ((THREAD_STACK_PAGE_INDEX[1] as u64) << 30) +
                 ((THREAD_STACK_PAGE_INDEX[2] as u64) << 21) +
                 (((n * 8) as u64) << 12);
 
-            return Ok((slot_address + 4096, slot_address + 8 * 4096)); // User stack
+            return Ok((slot_address + 4096,
+                       slot_address + 8 * 4096)); // User stack
         }
     }
 
     Err("All thread stack slots full")
 }
 
+fn active_level_1_table_containing(addr: VirtAddr) -> &'static mut PageTable {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+    let mut table = unsafe{&mut (*active_pagetable_ptr())};
 
+    for index in [addr.p4_index(),
+                  addr.p3_index(),
+                  addr.p2_index()] {
+
+        let entry = &mut table[index];
+        table = unsafe {&mut *(memory_info.phys_memory_offset + entry.addr().as_u64()).as_mut_ptr()};
+    }
+    table
+}
 fn create_pagetable() -> (*mut PageTable,u64) {
     let mem_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
@@ -687,23 +961,9 @@ pub fn create_user_pagetable() -> *mut PageTable {
     table as *mut PageTable
 }
 
-fn active_level_1_table_containing(addr: VirtAddr) -> &'static mut PageTable {
-    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-    let mut table = unsafe{&mut (*active_pagetable_ptr())};
 
-    for index in [addr.p4_index(),
-                  addr.p3_index(),
-                  addr.p2_index()] {
 
-        let entry = &mut table[index];
-        table = unsafe {&mut *(memory_info.phys_memory_offset
-                               + entry.addr().as_u64()).as_mut_ptr()};
-    }
-    table
-}
-pub fn allocate_missing_ondemand_frame(
-    addr: VirtAddr
-) -> Result<(), &'static str> {
+pub fn allocate_missing_ondemand_frame(addr: VirtAddr) -> Result<(), &'static str> {
 
     let table = active_level_1_table_containing(addr);
     let entry = &mut table[addr.p1_index()];
@@ -764,22 +1024,22 @@ fn time_stamp_counter() -> u64 {
 }
 
 pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
+    let addr = stack_end - 1u64; // Address in last page
+    let table = active_level_1_table_containing(addr);
+
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-    let mut mapper = unsafe {OffsetPageTable::new(memory_info.kernel_page_tables, memory_info.phys_memory_offset)};
 
-    // Calculate the start and end page for the stack
-    let addr = stack_end.as_u64() - 8 * 4096;
-    let stack_start = VirtAddr::new(addr);
-    let start_page: Page<Size4KiB> = Page::containing_address(stack_start);
-    let end_page = Page::containing_address(stack_end);
+    let iend = usize::from(addr.p1_index());
+    for index in ((iend - 6)..=iend).rev() {
+        let entry = &mut table[index];
 
-    // Iterate over all pages in the stack
-    for page in Page::range_inclusive(start_page, end_page) {
-        // Unmap the page
-        let (_frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap")?;
-
-        // Flush the TLB
-        flush.flush();
+        // Only writable pages have unique frames
+        if entry.flags().contains(PageTableFlags::WRITABLE) {
+            // Free this frame
+            memory_info.frame_allocator.deallocate_frame(
+                entry.frame().unwrap());
+        }
+        entry.set_flags(PageTableFlags::empty());
     }
 
     Ok(())
