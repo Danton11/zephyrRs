@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use spin::RwLock;
 use crate::sync::{Socket, Message, MESSAGE_TYPE_KEY};
-use crate::println;
+use crate::{println, serial_println};
 use crate::boot::gdt;
 use crate::print;
 use crate::proc::process;
@@ -85,7 +85,9 @@ extern "C" fn timer_handler(context_addr: usize) -> usize {
     // Process scheduler decides which process to schedule
     // Returns the stack pointer to switch to.
     let next_stack = process::schedule_next(context_addr);
-
+    if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+        process::monitor(thread);
+    }
     // Tell the PIC that the interrupt has been processed
     unsafe {
         PICS.lock()
@@ -233,7 +235,9 @@ use crate::hlt_loop;
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,error_code: PageFaultErrorCode,) {
     use x86_64::registers::control::Cr2;
     let accessed_virtaddr = Cr2::read();
-
+    //if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+    //    process::monitor(thread);
+    //}
     if error_code == (PageFaultErrorCode::PROTECTION_VIOLATION |
                       PageFaultErrorCode::CAUSED_BY_WRITE |
                       PageFaultErrorCode::USER_MODE) {
@@ -248,7 +252,11 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         println!("EXCEPTION: PAGE FAULT");
         println!("Accessed Address: {:?}", accessed_virtaddr);
         println!("Error Code: {:?}", error_code);
-        println!("{:#?}", stack_frame);
+        println!("{:#?}", stack_frame);       
+        serial_println!("EXCEPTION: PAGE FAULT");
+        serial_println!("Accessed Address: {:?}", accessed_virtaddr);
+        serial_println!("Error Code: {:?}", error_code);
+        serial_println!("{:#?}", stack_frame);
 
         hlt_loop();
     }
@@ -257,6 +265,9 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64) {
+    if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+        process::monitor(thread);
+    }
     panic!("EXCEPTION: GENERAL PROTECTION FAULT\n{:#?}", stack_frame);
 }
 
