@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 use core::format_args;
+use core::arch::asm;
 use api::{println, syscall, syscall::Message};
 //use core::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
 
@@ -76,6 +77,8 @@ fn main() {
 
         if ch == 'x' {
             println!("[!] - Exiting");
+            
+
             break;
         } else if ch == 'b' {
             call_basic_threads();
@@ -168,11 +171,13 @@ fn call_basic_threads() {
         match syscall::receive(3) {
             Ok(Message::Short(thread_id, _, _)) => {
                 println!("[main]: Thread {} has completed", thread_id);
+                
             },
             _ => {
                 println!("[main]: Unexpected message");
             }
         }
     }
+
 
 }

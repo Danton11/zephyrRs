@@ -9,7 +9,7 @@ use bootloader::{entry_point, BootInfo};
 use spin::RwLock;
 use core::panic::PanicInfo;
 use kernel::mem::memory;
-use kernel::syscall;
+use kernel::syscall::{self, SYSCALL_YEILD};
 use kernel::dev::vga_buffer;
 use kernel::boot::interrupts;
 use kernel::{println, serial_println};
@@ -20,7 +20,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use kernel::sync::Message;
-
+use core::arch::asm;
 
 use alloc::string::String;
 
@@ -31,7 +31,7 @@ entry_point!(kernel_main);
 fn kernel_thread_main() {
     let keyboard_listener = interrupts::keyboard_socket();
     let vga_listener = vga_buffer::start_listener();
-    let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone(), kernel::FIN_SOCKET.clone()]; // list of listeners for a process to have
+    let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone(), kernel::FIN_SOCKET.clone(), kernel::PROC_FIN_SOCKET.clone()]; // list of listeners for a process to have
     let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
 
     let proc_id = match proc {
@@ -43,9 +43,26 @@ fn kernel_thread_main() {
     };
      
     kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
-    //process::spawn_user_thread(include_bytes!("../../user/shell"),process::Params{handles: Vec::from([Arc::new(RwLock::new(Socket::Empty)),vga_listener]),mounts: Arc::new(RwLock::new(Vec::from([(String::from("/bin"), keyboard_listener)])))});
- 
 
+    for _ in 0..1000000000{
+        unsafe {asm!("nop");};
+
+    }
+
+    serial_println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
+
+    let proc_id = match proc {
+        Ok(val) => val,
+        Err(e) => {
+            println!("Error spawning user thread: {}", e);
+            return; // or handle the error in another way
+        }
+    };
+     
+    kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
+
+    
     kernel::hlt_loop();
 }
 

@@ -67,6 +67,30 @@ struct MemoryInfo {
 // useful struct to make init cleaner
 static mut MEMORY_INFO: Option<MemoryInfo> = None;
 
+struct MemoryStatistics {
+    total_memory: u64,
+    used_memory: u64,
+    free_memory: u64,
+    usable_memory: u64,
+    allocation_success: usize,
+    allocation_failure: usize,
+    deallocation_count: usize,
+    reused_mem: usize,
+    // Add other fields as needed
+}
+
+impl MemoryStatistics {
+    pub fn print_report(&self) {
+       serial_println!("Total Memory: {}", self.total_memory);
+       serial_println!("Used Memory: {}", self.used_memory);
+       serial_println!("Free Memory: {}", self.free_memory);
+       serial_println!("Usable Memory: {}", self.usable_memory);
+       serial_println!("Allocation Successes: {}", self.allocation_success);
+       serial_println!("Allocation Failures: {}", self.allocation_failure);
+       serial_println!("Deallocation Count: {}", self.deallocation_count);
+    // Print other fields as needed
+    }
+}
 
 ///- `init`: This function initializes an `OffsetPageTable` which can translate virtual addresses to physical addresses and vice versa. It requires the `physical_memory_offset` which indicates the difference between the physical and virtual address of a page.
 pub fn init(boot_info: &'static BootInfo) {
@@ -88,9 +112,12 @@ pub fn init(boot_info: &'static BootInfo) {
             let region_size = end_addr - start_addr;
             memory_size += region_size;
 
+
             println!("{:<20?} {:<#20X} {:<#20X} {:<15}", region.region_type, start_addr, end_addr, region_size);
             serial_println!("{:<20?}                {:<#20X} {:<#20X} {:<15}", region.region_type, start_addr, end_addr, region_size);
         }
+
+
 
         println!("-----------------------------------------------");
         println!("Total Memory Size: {}", memory_size);
@@ -99,6 +126,17 @@ pub fn init(boot_info: &'static BootInfo) {
         serial_println!("Total Memory Size: {}", memory_size);
         serial_println!("-------------------------------------------------------------------------------");
 
+        let memory_statistics = MemoryStatistics {
+            total_memory: memory_size,
+            used_memory: 0,
+            free_memory: memory_size,
+            usable_memory: memory_size,
+            allocation_success: 0,
+            allocation_failure: 0,
+            deallocation_count: 0,
+            reused_mem: 0,
+        // ... other fields ...
+        };
 
         let phys_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
 
@@ -288,21 +326,27 @@ impl PageFrameAllocator {
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 
+    
     fn deallocate_frame(&mut self, frame: PhysFrame) {
-        let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
-        self.frame_usage[frame_num] = false; // mark frame as free
 
-        // zero out the frame
-        let size = 4096; // size of a page/frame
-        let addr = frame.start_address().as_u64();
-        let virt_addr = self.translate_addr_phys_to_virt(addr);
+        // Convert frame address to frame number
+        let frame_num = frame.start_address().as_u64() as usize / 4096;
 
-        // convert the virtual address to a raw pointer
-        let ptr: *mut u8 = virt_addr.as_mut_ptr();
-        unsafe {
-            core::ptr::write_bytes(ptr, 0, size);
+        serial_println!("frame_address: {:?}", frame.start_address());
+        // Check if the frame is within the bounds of the frame_usage array
+        if frame_num < self.frame_usage.len() {
+            // Mark frame as free
+            self.frame_usage[frame_num] = false;
+
+            // If the frame is before the current 'next' index, update 'next'
+            if frame_num < self.next {
+                self.next = frame_num;
+            }
+        } else {
+            serial_println!("Error: Frame number {} is out of bounds", frame_num);
         }
     }
+
 
     // method to translate a physical address to a virtual one
     fn translate_addr_phys_to_virt(&self, addr: u64) -> VirtAddr {
@@ -759,24 +803,23 @@ fn time_stamp_counter() -> u64 {
     counter
 }
 
+
 pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
+    let addr = stack_end - 1u64; // Address in last page
+    let table = active_level_1_table_containing(addr);
+
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-    let mut mapper = unsafe {OffsetPageTable::new(memory_info.kernel_page_tables, memory_info.phys_memory_offset)};
 
-    // Calculate the start and end page for the stack
-    let addr = stack_end.as_u64() - 8 * 4096;
-    let stack_start = VirtAddr::new(addr);
-    let start_page: Page<Size4KiB> = Page::containing_address(stack_start);
-    let end_page = Page::containing_address(stack_end);
+    let iend = usize::from(addr.p1_index());
+    for index in ((iend - 6)..=iend).rev() {
+        let entry = &mut table[index];
 
-    serial_println!("Trying to remove pages from {:?} - {:?}", start_page,end_page);
-    // Iterate over all pages in the stack
-    for page in Page::range_inclusive(start_page, end_page) {
-        // Unmap the page
-        let (_frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap")?;
-
-        // Flush the TLB
-        flush.flush();
+        // Only writable pages have unique frames
+        if entry.flags().contains(PageTableFlags::WRITABLE) {
+            // Free this frame
+            memory_info.frame_allocator.deallocate_frame(entry.frame().unwrap());
+        }
+        entry.set_flags(PageTableFlags::empty());
     }
 
     Ok(())
