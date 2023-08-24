@@ -46,7 +46,11 @@ use core::fmt;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PageTableFlags;
 use core::arch::asm;
+use crate::MEMORYLOGGER;
 
+use lazy_static::lazy_static;
+pub mod memory_logger;
+use memory_logger::{MemoryLogger, MemoryRegion};
 
 const THREAD_STACK_PAGE_INDEX: [u8;3] = [5,0,0];
 
@@ -66,32 +70,6 @@ struct MemoryInfo {
 
 // useful struct to make init cleaner
 static mut MEMORY_INFO: Option<MemoryInfo> = None;
-
-struct MemoryStatistics {
-    total_memory: u64,
-    used_memory: u64,
-    free_memory: u64,
-    usable_memory: u64,
-    allocation_success: usize,
-    allocation_failure: usize,
-    deallocation_count: usize,
-    reused_mem: usize,
-    // Add other fields as needed
-}
-
-impl MemoryStatistics {
-    pub fn print_report(&self) {
-       serial_println!("Total Memory: {}", self.total_memory);
-       serial_println!("Used Memory: {}", self.used_memory);
-       serial_println!("Free Memory: {}", self.free_memory);
-       serial_println!("Usable Memory: {}", self.usable_memory);
-       serial_println!("Allocation Successes: {}", self.allocation_success);
-       serial_println!("Allocation Failures: {}", self.allocation_failure);
-       serial_println!("Deallocation Count: {}", self.deallocation_count);
-    // Print other fields as needed
-    }
-}
-
 ///- `init`: This function initializes an `OffsetPageTable` which can translate virtual addresses to physical addresses and vice versa. It requires the `physical_memory_offset` which indicates the difference between the physical and virtual address of a page.
 pub fn init(boot_info: &'static BootInfo) {
         interrupts::without_interrupts(|| {
@@ -126,17 +104,7 @@ pub fn init(boot_info: &'static BootInfo) {
         serial_println!("Total Memory Size: {}", memory_size);
         serial_println!("-------------------------------------------------------------------------------");
 
-        let memory_statistics = MemoryStatistics {
-            total_memory: memory_size,
-            used_memory: 0,
-            free_memory: memory_size,
-            usable_memory: memory_size,
-            allocation_success: 0,
-            allocation_failure: 0,
-            deallocation_count: 0,
-            reused_mem: 0,
-        // ... other fields ...
-        };
+        
 
         let phys_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
 
@@ -148,7 +116,8 @@ pub fn init(boot_info: &'static BootInfo) {
 
         allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
-
+        MEMORYLOGGER.lock().setTotalMemory(memory_size as usize);
+        //MEMORYLOGGER.lock().log_stats();
         // Store boot_info for later calls
         unsafe { MEMORY_INFO = Some(MemoryInfo {
             boot_info,
@@ -327,25 +296,7 @@ impl PageFrameAllocator {
     }
 
     
-    fn deallocate_frame(&mut self, frame: PhysFrame) {
-
-        // Convert frame address to frame number
-        let frame_num = frame.start_address().as_u64() as usize / 4096;
-
-        serial_println!("frame_address: {:?}", frame.start_address());
-        // Check if the frame is within the bounds of the frame_usage array
-        if frame_num < self.frame_usage.len() {
-            // Mark frame as free
-            self.frame_usage[frame_num] = false;
-
-            // If the frame is before the current 'next' index, update 'next'
-            if frame_num < self.next {
-                self.next = frame_num;
-            }
-        } else {
-            serial_println!("Error: Frame number {} is out of bounds", frame_num);
-        }
-    }
+    
 
 
     // method to translate a physical address to a virtual one
@@ -381,6 +332,27 @@ impl PageFrameAllocator {
         }
         None
     }
+    fn deallocate_frame(&mut self, frame: PhysFrame) {
+        // Convert frame address to frame number
+        let frame_num = frame.start_address().as_u64() as usize / 4096;
+
+        serial_println!("frame_address: {:?}", frame.start_address());
+        // Check if the frame is within the bounds of the frame_usage array
+        if frame_num < self.frame_usage.len() {
+            // Mark frame as free
+            self.frame_usage[frame_num] = false;
+
+            // If the frame is before the current 'next' index, update 'next'
+            if frame_num < self.next {
+                self.next = frame_num;
+            }
+
+
+        } else {
+            serial_println!("Error: Frame number {} is out of bounds", frame_num);
+        }
+        MEMORYLOGGER.lock().log_deallocation(MemoryRegion {start_address: frame.start_address().as_u64(), end_address: (frame.start_address() + frame.size()).as_u64()}, frame.size() as usize, true);
+    }
 }
 
 ///- `allocate_frame`: This method allocates a new frame of memory by returning the next usable frame from the memory map. After each allocation, it increments the `next` index to point to the next usable frame.
@@ -391,6 +363,7 @@ unsafe impl FrameAllocator<Size4KiB> for PageFrameAllocator {
             Some(frame) if self.is_frame_free(frame) => {
                 self.mark_frame_as_used(frame);
                 self.next += 1;
+                MEMORYLOGGER.lock().log_allocation(MemoryRegion {start_address: frame.start_address().as_u64(), end_address: (frame.start_address() + frame.size()).as_u64()}, frame.size() as usize, true);
                 Some(frame)
             }
             _ => { 
@@ -436,45 +409,89 @@ pub fn active_pagetable_physaddr() -> u64 {
     }
     physaddr
 }
-pub fn free_user_pagetables(level_4_physaddr: u64) {
-    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
-    fn free_pages_rec(physical_memory_offset: VirtAddr,
-                      frame_allocator: &mut PageFrameAllocator,
-                      table_physaddr: PhysAddr,
-                      level: u16) {
-        let table = unsafe{&mut *(physical_memory_offset
-                                  + table_physaddr.as_u64())
-                           .as_mut_ptr() as &mut PageTable};
-        for entry in table.iter() {
-            if !entry.is_unused() {
-                if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-                    // Maps a frame, not a page table
-                    if entry.flags().contains(PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE) {
-                        // A user frame => deallocate
-                        frame_allocator.deallocate_frame(
-                            entry.frame().unwrap());
-                    }
-                } else {
-                    // A page table
-                    free_pages_rec(physical_memory_offset,
-                                   frame_allocator,
-                                   entry.addr(),
-                                   level - 1);
+
+/// Recursively free all pages and page tables, including the page
+/// table at the given table_physaddr.
+fn free_pages_rec(physical_memory_offset: VirtAddr,
+                  frame_allocator: &mut PageFrameAllocator,
+                  physaddr: PhysAddr,
+                  level: u16) {
+
+    if level == 0 {
+        // A frame, not a table
+        frame_allocator.deallocate_frame(
+            PhysFrame::containing_address(physaddr));
+        return;
+    }
+
+    let table = unsafe{&mut *(physical_memory_offset
+                              + physaddr.as_u64())
+                       .as_mut_ptr() as &mut PageTable};
+    for entry in table.iter() {
+        if !entry.is_unused() {
+            if level == 1 || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                // Maps a frame, not a page table
+                if entry.flags().contains(PageTableFlags::PRESENT |
+                                          PageTableFlags::WRITABLE |
+                                          PageTableFlags::USER_ACCESSIBLE)  {
+                    // A user frame => deallocate
+                    frame_allocator.deallocate_frame(
+                        entry.frame().unwrap());
                 }
+            } else {
+                // A page table
+                free_pages_rec(physical_memory_offset,
+                               frame_allocator,
+                               entry.addr(),
+                               level - 1);
             }
         }
-        // Free page table
-        frame_allocator.deallocate_frame(
-            PhysFrame::from_start_address(table_physaddr).unwrap());
     }
+    // Free page table
+    frame_allocator.deallocate_frame(
+        PhysFrame::from_start_address(physaddr).unwrap());
+}
+
+/// Free all user-accessible pages and the page table frames
+///
+/// Note: Must not be called to free the current page tables
+///       Switch to kernel pagetable before calling
+pub fn free_user_pagetables(level_4_physaddr: u64) {
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
     free_pages_rec(memory_info.phys_memory_offset,
                    &mut memory_info.frame_allocator,
                    PhysAddr::new(level_4_physaddr),
                    4);
 }
-
+//pub fn free_user_pagetables(level_4_physaddr: u64) {
+//    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+//
+//    fn free_pages_rec(physical_memory_offset: VirtAddr,frame_allocator: &mut PageFrameAllocator,table_physaddr: PhysAddr,level: u16) {
+//        let table = unsafe{&mut *(physical_memory_offset + table_physaddr.as_u64()).as_mut_ptr() as &mut PageTable};
+//        for entry in table.iter() {
+//            if !entry.is_unused() {
+//                if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+//                    // Maps a frame, not a page table
+//                    if entry.flags().contains(PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE) {
+//                        // A user frame => deallocate
+//                        frame_allocator.deallocate_frame(entry.frame().unwrap());
+//                    }
+//                } else {
+//                    // A page table
+//                    free_pages_rec(physical_memory_offset,frame_allocator,entry.addr(),level - 1);
+//                }
+//            }
+//        }
+//        // Free page table
+//        frame_allocator.deallocate_frame(
+//            PhysFrame::from_start_address(table_physaddr).unwrap());
+//    }
+//
+//    free_pages_rec(memory_info.phys_memory_offset,&mut memory_info.frame_allocator,PhysAddr::new(level_4_physaddr),4);
+//}
+//
 
 
 
@@ -686,6 +703,27 @@ pub fn allocate_user_stack(level_4_table: *mut PageTable) -> Result<(u64, u64), 
     Err("All thread stack slots full")
 }
 
+pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
+    let addr = stack_end - 1u64; // Address in last page
+    let table = active_level_1_table_containing(addr);
+
+    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
+
+    let iend = usize::from(addr.p1_index());
+    for index in ((iend - 10)..=iend).rev() {
+        let entry = &mut table[index];
+
+        // Only writable pages have unique frames
+        if entry.flags().contains(PageTableFlags::WRITABLE) {
+            // Free this frame
+            memory_info.frame_allocator.deallocate_frame(entry.frame().unwrap());
+        }
+        entry.set_flags(PageTableFlags::empty());
+    }
+
+    Ok(())
+}
+
 
 fn create_pagetable() -> (*mut PageTable,u64) {
     let mem_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
@@ -803,27 +841,6 @@ fn time_stamp_counter() -> u64 {
     counter
 }
 
-
-pub fn free_user_stack(stack_end: VirtAddr) -> Result<(), &'static str> {
-    let addr = stack_end - 1u64; // Address in last page
-    let table = active_level_1_table_containing(addr);
-
-    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-
-    let iend = usize::from(addr.p1_index());
-    for index in ((iend - 6)..=iend).rev() {
-        let entry = &mut table[index];
-
-        // Only writable pages have unique frames
-        if entry.flags().contains(PageTableFlags::WRITABLE) {
-            // Free this frame
-            memory_info.frame_allocator.deallocate_frame(entry.frame().unwrap());
-        }
-        entry.set_flags(PageTableFlags::empty());
-    }
-
-    Ok(())
-}
 
 
 pub fn test_alloc_times() {

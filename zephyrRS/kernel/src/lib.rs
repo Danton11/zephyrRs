@@ -25,6 +25,7 @@ pub mod syscall;
 pub mod sync;
 use sync::{Message, Socket};
 
+use mem::memory::memory_logger::MemoryLogger;
 use dev::vga_buffer;
 
 lazy_static! {
@@ -41,6 +42,10 @@ lazy_static! {
 lazy_static! {
     pub static ref FIN_SOCKET: Arc<RwLock<Socket>> =
         Arc::new(RwLock::new(Socket::Empty));
+}
+
+lazy_static! {
+    pub static ref MEMORYLOGGER: spin::Mutex<MemoryLogger> = spin::Mutex::new(MemoryLogger::new());
 }
 
 

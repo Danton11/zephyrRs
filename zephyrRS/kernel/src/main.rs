@@ -11,8 +11,8 @@ use core::panic::PanicInfo;
 use kernel::mem::memory;
 use kernel::syscall::{self, SYSCALL_YEILD};
 use kernel::dev::vga_buffer;
-use kernel::boot::interrupts;
-use kernel::{println, serial_println};
+use kernel::boot::interrupts::{self, Context};
+use kernel::{println, serial_println, QemuExitCode};
 use kernel::proc::process;
 use kernel::sync::Socket;
 use lazy_static::lazy_static;
@@ -22,6 +22,7 @@ use alloc::sync::Arc;
 use kernel::sync::Message;
 use core::arch::asm;
 
+use x86_64::instructions::port::Port;
 use alloc::string::String;
 
 
@@ -32,6 +33,11 @@ fn kernel_thread_main() {
     let keyboard_listener = interrupts::keyboard_socket();
     let vga_listener = vga_buffer::start_listener();
     let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone(), kernel::FIN_SOCKET.clone(), kernel::PROC_FIN_SOCKET.clone()]; // list of listeners for a process to have
+    //
+    //
+
+    
+
     let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
 
     let proc_id = match proc {
@@ -85,8 +91,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     #[cfg(test)]
     test_main();
+    unsafe {
+        let mut port = Port::new(0xf4);
+        port.write(QemuExitCode::Success as u32);
+    }
+    //process::spawn_kernel_thread(kernel_thread_main, Vec::new());
 
-    process::spawn_kernel_thread(kernel_thread_main, Vec::new());
+
+
 
     kernel::hlt_loop();
 }
