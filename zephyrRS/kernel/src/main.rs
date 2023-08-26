@@ -91,11 +91,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     #[cfg(test)]
     test_main();
-    unsafe {
-        let mut port = Port::new(0xf4);
-        port.write(QemuExitCode::Success as u32);
-    }
-    //process::spawn_kernel_thread(kernel_thread_main, Vec::new());
+    
+    process::spawn_kernel_thread(kernel_thread_main, Vec::new());
 
 
 
