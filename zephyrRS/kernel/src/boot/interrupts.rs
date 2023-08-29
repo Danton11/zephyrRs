@@ -249,6 +249,11 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
             hlt_loop();
         }
     } else {
+        if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+           serial_println!("Exiting thread {}", thread.get_thread_id());
+           //process::exit_current_thread(thread.context_mut());
+        }
+
         println!("EXCEPTION: PAGE FAULT");
         println!("Accessed Address: {:?}", accessed_virtaddr);
         println!("Error Code: {:?}", error_code);

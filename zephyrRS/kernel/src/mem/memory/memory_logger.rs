@@ -92,7 +92,7 @@ impl MemoryLogger {
         } else {
             self.deallocation_failures += 1;
         }
-
+        
         serial_println!("[MEM_STATS]: TM[{:?}]UM[{:?}]FM[{:?}]AS[{}]AF[{}]AR[]DS[{}]DF[{}]DR[start: 0x{:016X}, end: 0x{:016X}]PU[{:?}]MR[{:?}]",
             self.total_memory, self.used_memory, self.free_memory, self.allocation_successes, self.allocation_failures,
             self.deallocation_successes, self.deallocation_failures,

@@ -35,7 +35,7 @@ fn recursive_function(depth: usize, thread_id: u64) {
     }
     
     // Artificially use up some stack space
-    let _array: [u8; 100] = [0; 100]; // 100 include_bytes!("
+    let _array: [u8; 1000] = [0; 1000]; // 100 include_bytes!("
     
     syscall::thread_yield();
     // Recursive call

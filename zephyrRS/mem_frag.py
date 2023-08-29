@@ -1,35 +1,50 @@
 
 import re
+from collections import defaultdict
 
-def parse_regions(log_file):
-    allocation_regions = []
-    deallocation_regions = []
-    with open(log_file, 'r') as file:
-        for line in file:
-            match = re.search(r'AR\[start: (\w+), end: (\w+)\]', line)
-            if match:
-                start_address = int(match.group(1), 16)
-                end_address = int(match.group(2), 16)
-                allocation_regions.append((start_address, end_address))
+def calculate_fragmentation(log_file_path):
+    # Dictionary to track allocated and deallocated regions
+    allocations = defaultdict(int)
+    # List to store all memory regions
+    all_regions = []
 
-            match = re.search(r'DR\[start: (\w+), end: (\w+)\]', line)
-            if match:
-                start_address = int(match.group(1), 16)
-                end_address = int(match.group(2), 16)
-                deallocation_regions.append((start_address, end_address))
+    with open(log_file_path, 'r') as f:
+        for line in f:
+            # Skip lines that don't start with [MEM_STATS]
+            if not line.startswith("[MEM_STATS]"):
+                continue
 
-    return allocation_regions, deallocation_regions
+            # Extract allocation and deallocation regions using regular expressions
+            allocation_match = re.search(r'AR\[start: (0x[0-9A-Fa-f]+), end: (0x[0-9A-Fa-f]+)\]', line)
+            deallocation_match = re.search(r'DR\[start: (0x[0-9A-Fa-f]+), end: (0x[0-9A-Fa-f]+)\]', line)
 
-def calculate_fragmentation(allocation_regions, deallocation_regions):
-    total_regions = len(allocation_regions) + len(deallocation_regions)
-    free_regions = len(deallocation_regions)
-    fragmentation_ratio = free_regions / total_regions * 100
+            if allocation_match:
+                start_address = int(allocation_match.group(1), 16)
+                end_address = int(allocation_match.group(2), 16)
+                all_regions.append((start_address, end_address, 'A'))
 
-    print(f"Total Regions: {total_regions}")
-    print(f"Allocated at some point regions: {len(allocation_regions)}")
-    print(f"Free Regions: {free_regions}")
-    print(f"Fragmentation Ratio: {fragmentation_ratio:.2f}%")
+            if deallocation_match:
+                start_address = int(deallocation_match.group(1), 16)
+                end_address = int(deallocation_match.group(2), 16)
+                all_regions.append((start_address, end_address, 'D'))
 
-allocation_regions, deallocation_regions = parse_regions('serial_output.log')
-calculate_fragmentation(allocation_regions, deallocation_regions)
+    # Sort all regions by their start address
+    all_regions.sort(key=lambda x: x[0])
+
+    # Calculate fragmentation
+    fragmentation_count = 0
+    last_end_address = 0
+
+    for start_address, end_address, action in all_regions:
+        if action == 'A':  # Allocation
+            gap = start_address - last_end_address
+            if gap > 0:
+                fragmentation_count += gap
+            last_end_address = max(last_end_address, end_address)
+        elif action == 'D':  # Deallocation
+            pass  # For now, we ignore deallocations
+
+    print(f"Total Fragmentation: {fragmentation_count} bytes")
+
+calculate_fragmentation("memory_logs.log")
 

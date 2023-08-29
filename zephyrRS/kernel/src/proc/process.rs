@@ -189,7 +189,7 @@ impl Thread {
         unsafe {& *(self.context as *const Context)}
     }
 
-    fn context_mut(&self) -> &mut Context {
+    pub fn context_mut(&self) -> &mut Context {
         unsafe {&mut *(self.context as *mut Context)}
     }
     
@@ -689,7 +689,10 @@ pub fn exit_current_thread(_current_context: &mut Context) {
         let mut current_thread = CURR_THREAD.write();
 
         if let Some(_thread) = current_thread.take() {
-            monitor(&_thread);
+
+            RUNNING.write().retain(|t| t.thread_id != _thread.thread_id);
+
+            //monitor(&_thread);
         }
     }
     // Wait for the next timer interrupt. This halts the CPU until the next interrupt.
@@ -775,49 +778,50 @@ pub fn open_path(current_context: &mut Context,path: &str) -> Result<usize, usiz
 }
 
 
-pub fn allocate_memory_chunk(pages_required: u64,max_physical_address: u64) -> Result<(VirtAddr, PhysAddr), usize> {
-    // Get the current active thread.
-    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
-        println!("[!] - Thread {} requesting {} pages", current_thread.get_thread_id(), pages_required);
+//pub fn allocate_memory_chunk(pages_required: u64,max_physical_address: u64) -> Result<(VirtAddr, PhysAddr), usize> {
+//    // Get the current active thread.
+//    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
+//        println!("[!] - Thread {} requesting {} pages", current_thread.get_thread_id(), pages_required);
+//
+//        // Fetch a virtual address for an available chunk of pages.
+//        let chunk_start_addr = match memory::find_available_page_chunk(
+//            current_thread.page_table_phys) {
+//            Some(address) => address,
+//            None => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
+//        };
+//        if max_physical_address != 0 {
+//            // If the user specifies a max physical address, 
+//            // we need to allocate consecutive frames.
+//            let physical_start_addr = match memory::create_sequential_pages(
+//                current_thread.page_table_phys,
+//                chunk_start_addr,
+//                pages_required,
+//                max_physical_address) {
+//                Ok(phys_addr) => phys_addr,
+//                Err(_) => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
+//            };
+//
+//            return Ok((chunk_start_addr, physical_start_addr));
+//        } else {
+//            // If no specific physical address range is required,
+//            // allocate frames on an on-demand basis.
+//            
+//            if memory::create_user_ondemand_pages(
+//                current_thread.page_table_phys,
+//                chunk_start_addr,
+//                pages_required).is_err() {
+//                return Err(syscall::SYSCALL_ERROR_MEMALLOC);
+//            }
+//
+//            // Since we're not ensuring sequential physical addresses, 
+//            // we return 0 for the physical address.
+//            return Ok((chunk_start_addr, PhysAddr::new(0)));
+//        }
+//    }
+//    // Return an error if no active thread is found.
+//    Err(syscall::SYSCALL_ERROR_MEMALLOC)
+//}
 
-        // Fetch a virtual address for an available chunk of pages.
-        let chunk_start_addr = match memory::find_available_page_chunk(
-            current_thread.page_table_phys) {
-            Some(address) => address,
-            None => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
-        };
-        if max_physical_address != 0 {
-            // If the user specifies a max physical address, 
-            // we need to allocate consecutive frames.
-            let physical_start_addr = match memory::create_sequential_pages(
-                current_thread.page_table_phys,
-                chunk_start_addr,
-                pages_required,
-                max_physical_address) {
-                Ok(phys_addr) => phys_addr,
-                Err(_) => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
-            };
-
-            return Ok((chunk_start_addr, physical_start_addr));
-        } else {
-            // If no specific physical address range is required,
-            // allocate frames on an on-demand basis.
-            
-            if memory::create_user_ondemand_pages(
-                current_thread.page_table_phys,
-                chunk_start_addr,
-                pages_required).is_err() {
-                return Err(syscall::SYSCALL_ERROR_MEMALLOC);
-            }
-
-            // Since we're not ensuring sequential physical addresses, 
-            // we return 0 for the physical address.
-            return Ok((chunk_start_addr, PhysAddr::new(0)));
-        }
-    }
-    // Return an error if no active thread is found.
-    Err(syscall::SYSCALL_ERROR_MEMALLOC)
-}
 
 #[inline]
 fn get_current_stack_pointer() -> usize {

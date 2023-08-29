@@ -39,8 +39,6 @@ def analyze_regions(log_file):
     for start, end in deallocation_regions:
         print(f"Start: {start:#x}, End: {end:#x}, Size: {end - start}")
 
-log_file = 'serial_output.txt'
-analyze_regions(log_file)
 def parse_memory_statistics(log_lines):
     memory_statistics = []
     pattern = re.compile(r'\[MEM_STATS\]: TM\[(\d+)\]UM\[(\d+)\]FM\[(\d+)\]AS\[(\d+)\]AF\[(\d+)\]AR\[start: (.*?), end: (.*?)\]DS\[(\d+)\]DF\[(\d+)\]DR\[start: (.*?), end: (.*?)\]')
@@ -94,6 +92,6 @@ def plot_regions(regions, title):
     plt.ylabel('Size')
     plt.show()
 
-allocation_regions, deallocation_regions = parse_regions('serial_output.txt')
+allocation_regions, deallocation_regions = parse_regions('serial_output.log')
 plot_regions(allocation_regions, 'Allocation Regions')
 plot_regions(deallocation_regions, 'Deallocation Regions')
