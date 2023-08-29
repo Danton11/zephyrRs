@@ -30,6 +30,6 @@ def calculate_fragmentation(allocation_regions, deallocation_regions):
     print(f"Free Regions: {free_regions}")
     print(f"Fragmentation Ratio: {fragmentation_ratio:.2f}%")
 
-allocation_regions, deallocation_regions = parse_regions('serial_output.txt')
+allocation_regions, deallocation_regions = parse_regions('serial_output.log')
 calculate_fragmentation(allocation_regions, deallocation_regions)
 
