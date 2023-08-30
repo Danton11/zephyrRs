@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use spin::RwLock;
 use crate::sync::{Socket, Message, MESSAGE_TYPE_KEY};
-use crate::{println, serial_println};
+use crate::{println, serial_println, syscall};
 use crate::boot::gdt;
 use crate::print;
 use crate::proc::process;
@@ -241,18 +241,20 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
     if error_code == (PageFaultErrorCode::PROTECTION_VIOLATION |
                       PageFaultErrorCode::CAUSED_BY_WRITE |
                       PageFaultErrorCode::USER_MODE) {
-        // User code tried to access a read-only page
+        // User code tried to access a read-only page or kernel page
         // Missing stack or heap frame
-
+        serial_println!("EXCEPTION: PAGE FAULT");
+        serial_println!("Accessed Address: {:?}", accessed_virtaddr);
+        serial_println!("Error Code: {:?}", error_code);
+        serial_println!("{:#?}", stack_frame);
         if let Err(msg) = memory::allocate_missing_ondemand_frame(accessed_virtaddr) {
             println!("Page fault error: {}", msg);
+            serial_println!("Page fault error: {}", msg);
             hlt_loop();
         }
+
     } else {
-        if let Some(thread) = process::CURR_THREAD.read().as_ref() {
-           serial_println!("Exiting thread {}", thread.get_thread_id());
-           //process::exit_current_thread(thread.context_mut());
-        }
+        
 
         println!("EXCEPTION: PAGE FAULT");
         println!("Accessed Address: {:?}", accessed_virtaddr);
@@ -262,7 +264,10 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         serial_println!("Accessed Address: {:?}", accessed_virtaddr);
         serial_println!("Error Code: {:?}", error_code);
         serial_println!("{:#?}", stack_frame);
-
+        if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+           serial_println!("Exiting thread {}", thread.get_thread_id());
+           //process::exit_current_thread(thread.context_mut());
+        }
         hlt_loop();
     }
 }

@@ -15,34 +15,30 @@ use crate::sync::Socket;
 use crate::sync::{Message,Data};
 use core::fmt;
 use crate::ID_SOCKET;
-
-//use core::ptr;
 use object::{Object, ObjectSegment};
 
-/// Size of the kernel stack for each thread, in bytes
-pub const KERNEL_STACK_SIZE: usize = 4096 * 3;
+// Constants for stack sizes and memory regions
+pub const KERNEL_STACK_SIZE: usize = 4096 * 3;  // Size of the kernel stack in bytes (12 KiB)
+pub const USER_STACK_SIZE: usize = 4096 * 10;   // Size of the user stack in bytes (40 KiB)
+pub const USER_CODE_START: u64 = 0x5000000;     // Starting address for user code
+const USER_CODE_END: u64 = 0x90000000;          // Ending address for user code
+const USER_HEAP_START: u64 = 0x280_0060_0000;   // Starting address for user heap
+const USER_HEAP_SIZE: u64 = 4194304;            // Size of the user heap in bytes (4 MiB)
 
-/// Size of the user stack for each user thread, in bytes
-pub const USER_STACK_SIZE: usize = 4096 * 10;
-/// Lowest address that user code can be loaded into
-pub const USER_CODE_START: u64 = 0x5000000;
-/// Exclusive upper limit for user code
-const USER_CODE_END: u64 = 0x90000000;
-
-const USER_HEAP_START: u64 = 0x280_0060_0000;
-const USER_HEAP_SIZE: u64 = 4 * 1024 * 1024;
-
-
-
+// Global state for thread management
 lazy_static! {
-    // queue that contains moveable boxes of Threads
+    // Queue containing runnable threads
     static ref RUNNING: RwLock<VecDeque<Box<Thread>>> =
         RwLock::new(VecDeque::new());
-
+    
+    // Current executing thread
     pub static ref CURR_THREAD: RwLock<Option<Box<Thread>>> = RwLock::new(None);
+    
+    // Counter for generating unique IDs
     static ref COUNTER: RwLock<u64> = RwLock::new(0);
 }
 
+// Function to generate a unique ID
 pub fn unique_id() -> u64 {
     interrupts::without_interrupts(|| {
         let mut counter = COUNTER.write();
@@ -51,18 +47,25 @@ pub fn unique_id() -> u64 {
     })
 }
 
+// Process struct definition
 pub struct Process {
-    //A Process has a page_table_physaddr, which is the physical address of its page table, allowing it to have its own separate virtual memory space.
+    // Physical address of the page table for this process
     page_table_physaddr: u64,
-    fdescriptor: Vec<Option<Arc<RwLock<Socket>>>>,
+    
+    // File descriptors for the process
+    sockets: Vec<Option<Arc<RwLock<Socket>>>>,
+    
+    // Mounted filesystems for the process
     mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>>,
 }
 
+// Enum to distinguish between Kernel and User threads
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ThreadType {
-    Kernel,
-    User,
+    Kernel,  // Kernel-level thread
+    User,    // User-level thread
 }
+
 
 pub struct Thread {
 
@@ -158,30 +161,30 @@ impl Thread {
         serial_println!("-----------------------------------------------");
     }
 
-    pub fn get_fdescriptor(&self, id: u64) -> Option<Arc<RwLock<Socket>>> {
-            self.process.read().fdescriptor.get(id as usize).unwrap_or(&None).as_ref().map(|rv| rv.clone()) // Option<Arc<>>
+    pub fn get_sockets(&self, id: u64) -> Option<Arc<RwLock<Socket>>> {
+            self.process.read().sockets.get(id as usize).unwrap_or(&None).as_ref().map(|rv| rv.clone()) // Option<Arc<>>
     }
 
     pub fn take_socket(&self, id: u64)-> Option<Arc<RwLock<Socket>>> {
-        self.process.write().fdescriptor.get_mut(id as usize).map_or(None, |elem| elem.take())
+        self.process.write().sockets.get_mut(id as usize).map_or(None, |elem| elem.take())
     }
 
     /// Add a socket to the process, returning the handle
     pub fn give_socket(&self, socket: Arc<RwLock<Socket>>) -> u64 {
-        // Lock the fdescriptor
-        let fdescriptor = &mut self.process.write().fdescriptor;
+        // Lock the sockets
+        let sockets = &mut self.process.write().sockets;
 
         // Find empty handle slot
-        for (pos, handle) in fdescriptor.iter().enumerate() {
+        for (pos, handle) in sockets.iter().enumerate() {
             if handle.is_none() {
                 // Found empty slot => Store socket
-                fdescriptor[pos] = Some(socket);
+                sockets[pos] = Some(socket);
                 return pos as u64;
             }
         }
         // All full => Add new handle
-        fdescriptor.push(Some(socket));
-        (fdescriptor.len() - 1) as u64
+        sockets.push(Some(socket));
+        (sockets.len() - 1) as u64
     }
 
     // Functions to manipulate and retrieve the context (saved state) of a thread.
@@ -278,15 +281,15 @@ impl Drop for Process {
 impl Process {
     // This method allows adding a new socket handle to a process's file descriptor table.
     fn add_handle(&mut self, rv: Arc<RwLock<Socket>>) -> usize {
-        // Find if there is an empty fdescriptor slots
-        if let Some(index) = self.fdescriptor.iter().position(
+        // Find if there is an empty sockets slots
+        if let Some(index) = self.sockets.iter().position(
             |handle| handle.is_none()) {
-            self.fdescriptor[index] = Some(rv);
+            self.sockets[index] = Some(rv);
             return index;
         }
         // No free slot -> Add one
-        self.fdescriptor.push(Some(rv));
-        self.fdescriptor.len() - 1
+        self.sockets.push(Some(rv));
+        self.sockets.len() - 1
     }
 }
 
@@ -370,7 +373,7 @@ Execution:
 
 // Function to spawn a new kernel thread, initializing its context and adding it to the scheduling queue.
 // create a kernel thread within the kernel stack space
-pub fn spawn_kernel_thread(function: fn()->(), mut fdescriptor: Vec<Arc<RwLock<Socket>>>) -> u64 {
+pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socket>>>) -> u64 {
     let  new_thread = {
         let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE + USER_STACK_SIZE);
         let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
@@ -380,7 +383,7 @@ pub fn spawn_kernel_thread(function: fn()->(), mut fdescriptor: Vec<Arc<RwLock<S
         let uid = unique_id();
         Box::new(Thread {
             thread_id: uid,
-            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, fdescriptor: fdescriptor.drain(..).map(|h| Some(h)).collect(), mounts: Arc::new(RwLock::new(Vec::new()))})),
+            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: Arc::new(RwLock::new(Vec::new()))})),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
@@ -454,7 +457,7 @@ fn with_pagetable<F, R>(page_table_physaddr: u64, func: F) -> R where
 pub struct Params { 
     // A vector containing file descriptors represented as sockets. 
     // This allows for shared access to file descriptors among threads.
-    pub fdescriptor: Vec<Arc<RwLock<Socket>>>,
+    pub sockets: Vec<Arc<RwLock<Socket>>>,
     // A mapping of mount points (e.g., "/mnt/disk1") to their corresponding sockets.
     // This provides a mechanism for threads to access shared mount points.
     pub mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>> 
@@ -486,7 +489,7 @@ pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str>
 
         // Create a user pagetable that includes only kernel pages.
         let (user_page_table_ptr, user_page_table_physaddr) = memory::create_kernel_only_pagetable();
-        serial_println!("Thread allocated page table at physical address {:#x}", user_page_table_physaddr);
+        //serial_println!("Thread allocated page table at physical address {:#x}", user_page_table_physaddr);
 
         // Allocate user heap memory. This is memory reserved for dynamic allocations 
         // during the execution of the user thread (e.g., when `malloc` is called).
@@ -494,7 +497,7 @@ pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str>
             user_page_table_physaddr,
             VirtAddr::new(USER_HEAP_START),
             USER_HEAP_SIZE).is_err() {
-            return Err("Couldn't allocate on-demand pages");
+            return Err("Not able to allocate user stack...");
         }
 
         // Switch to the user pagetable and setup the memory segments 
@@ -569,13 +572,13 @@ pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str>
                 serial_println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
 
                 // Extract file descriptors for the thread.
-                let mut fdescriptor = params.fdescriptor;
+                let mut sockets = params.sockets;
 
                 // Construct the thread object.
                 Box::new(Thread {
                     thread_id:  uid,
                     // Create a new process associated with the thread.
-                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, fdescriptor: fdescriptor.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
+                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
                     page_table_phys: user_page_table_physaddr,
                     kernel_stack,
                     // Note that stacks move backwards, so SP points to the end
@@ -868,10 +871,12 @@ pub fn monitor(thread: &Thread) {
             let user_stack_ptr = get_current_user_stack_pointer_from_context(context);
             //serial_println!("Direct user_stack_ptr: {:#x}", user_stack_ptr);
             let stack_usage = thread.user_stack_end as isize - user_stack_ptr as isize;
+
+            let stack_percentage = (stack_usage as f64 / (4096.0 * 10.0)) * 100.0;
             serial_println!(
-                "[STACK_MONITOR][USER][Thread {}] Stack Usage: {} bytes", 
+                "[STACK_MONITOR][USER][Thread {}] Stack Usage: {} bytes ({}%)" , 
                 thread.thread_id, 
-                stack_usage
+                stack_usage, stack_percentage
             );
         },
     }

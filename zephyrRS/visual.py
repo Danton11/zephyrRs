@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TkAgg')
 # Read the captured serial output.
-with open("serial_output.txt", "r") as f:
+with open("stack_logs.log", "r") as f:
     lines = f.readlines()
 
 # Filter out stack monitoring logs.

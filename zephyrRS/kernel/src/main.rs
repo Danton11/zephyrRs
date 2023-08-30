@@ -38,7 +38,7 @@ fn kernel_thread_main() {
 
     
 
-    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
+    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { sockets: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
 
     let proc_id = match proc {
         Ok(val) => val,
@@ -49,25 +49,25 @@ fn kernel_thread_main() {
     };
      
     kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
-
-    for _ in 0..1000000000{
-        unsafe {asm!("nop");};
-
-    }
-
-    serial_println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { fdescriptor: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
-
-    let proc_id = match proc {
-        Ok(val) => val,
-        Err(e) => {
-            println!("Error spawning user thread: {}", e);
-            return; // or handle the error in another way
-        }
-    };
-     
-    kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
-
+//
+//    for _ in 0..1000000000{
+//        unsafe {asm!("nop");};
+//
+//    }
+//
+//    serial_println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+//    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { sockets: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
+//
+//    let proc_id = match proc {
+//        Ok(val) => val,
+//        Err(e) => {
+//            println!("Error spawning user thread: {}", e);
+//            return; // or handle the error in another way
+//        }
+//    };
+//     
+//    kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
+//
     
     kernel::hlt_loop();
 }
@@ -88,6 +88,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Set up system calls
     syscall::init();
+    println!("Successfully initialised syscall functionality");
+    serial_println!("Successfully initialised syscall functionality");
+
     
     #[cfg(test)]
     test_main();

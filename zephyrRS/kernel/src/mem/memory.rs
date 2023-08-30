@@ -115,7 +115,7 @@ pub fn init(boot_info: &'static BootInfo) {
         allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
         MEMORYLOGGER.lock().setTotalMemory(memory_size as usize);
-        //MEMORYLOGGER.lock().log_stats();
+        MEMORYLOGGER.lock().log_stats();
         // Store boot_info for later calls
         unsafe { MEMORY_INFO = Some(MemoryInfo {
             boot_info,
@@ -272,15 +272,14 @@ impl PageFrameAllocator {
             phys_memory_offset
         }
     }
+
     pub fn total_frames(&self) -> usize {
     // get usable regions from memory map
-    let regions = self.memory_map.iter();
-    let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-    // sum up the size of each region and divide by the size of a frame to get the number of frames
-    let total_frames: usize = usable_regions
-        .map(|r| (r.range.end_addr() - r.range.start_addr()) as usize / 4096)
-        .sum();
-    total_frames
+        let regions = self.memory_map.iter();
+        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+        // sum up the size of each region and divide by the size of a frame to get the number of frames
+        let total_frames: usize = usable_regions.map(|r| (r.range.end_addr() - r.range.start_addr()) as usize / 4096).sum();
+        total_frames
 }
     /// Returns the total size of usable memory.
 
@@ -296,9 +295,6 @@ impl PageFrameAllocator {
         let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
         self.frame_usage[frame_num] = true; // mark frame as used
     }
-
-
-
 
     fn is_frame_free(&self, frame: PhysFrame) -> bool {
         let frame_num = frame.start_address().as_u64() as usize / 4096; // convert frame address to frame number
@@ -319,10 +315,6 @@ impl PageFrameAllocator {
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 
-    
-    
-
-
     // method to translate a physical address to a virtual one
     fn translate_addr_phys_to_virt(&self, addr: u64) -> VirtAddr {
         self.phys_memory_offset + addr
@@ -332,68 +324,6 @@ impl PageFrameAllocator {
     fn translate_addr_virt_to_phys(&self, addr: VirtAddr) -> u64 {
         addr.as_u64() - self.phys_memory_offset.as_u64()
     }
-    /// Finds a sequence of consecutive free frames in the memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `needed_frames`: The number of consecutive frames needed.
-    /// * `max_address`: The maximum address to consider for allocation.
-    ///
-    /// # Returns
-    ///
-    /// Returns the index of the first frame in the sequence if found, otherwise returns None.
-    fn consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<u64> {
-        // Counter to keep track of consecutive free frames
-        let mut count = 0;
-        
-        // Iterate over each frame in the list of usable frames
-        for (idx, frame) in self.usable_frames().enumerate() {
-            // Check if the frame is free and its start address is below the max_address
-            if self.is_frame_free(frame) && frame.start_address().as_u64() < max_address {
-                count += 1;
-                
-                // If we've found enough consecutive frames
-                if count == needed_frames {
-                    // Mark these frames as used
-                    for i in 0..needed_frames {
-                        let frame_to_mark = self.usable_frames().nth((idx as u64 - i) as usize).unwrap();
-                        self.mark_frame_as_used(frame_to_mark);
-                    }
-                    
-                    // Return the index of the first frame in this sequence
-                    return Some(idx as u64 - needed_frames + 1);
-                }
-            } else {
-                // Reset the counter if we hit a used frame or a frame above max_address
-                count = 0;
-            }
-        }
-        
-        // Return None if no sequence of free frames was found
-        None
-    }
-
-    /// Allocates a sequence of consecutive frames in the memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `needed_frames`: The number of consecutive frames needed.
-    /// * `max_address`: The maximum address to consider for allocation.
-    ///
-    /// # Returns
-    ///
-    /// Returns a PhysFrame containing the address of the first frame if successful, otherwise returns None.
-    fn allocate_consecutive_frames(&mut self, needed_frames: u64, max_address: u64) -> Option<PhysFrame> {
-        // Use the `consecutive_frames` method to find a sequence of free frames
-        if let Some(frame_number) = self.consecutive_frames(needed_frames, max_address) {
-            // Convert the frame number to a physical address and return it wrapped in a PhysFrame
-            return Some(PhysFrame::containing_address(PhysAddr::new(frame_number * 4096)));
-        }
-        
-        // Return None if no sequence of free frames was found
-        None
-    }
-
 
     fn deallocate_frame(&mut self, frame: PhysFrame) {
         // Convert frame address to frame number
@@ -458,6 +388,8 @@ pub fn kernel_mode() {
         - memory_info.phys_memory_offset.as_u64();
     switch_to_pagetable(phys_addr);
 }
+
+
 pub fn switch_to_pagetable(phys_addr: u64) {
     unsafe {
         asm!("mov cr3, {addr}",
@@ -523,133 +455,10 @@ fn free_pages_rec(physical_memory_offset: VirtAddr,
 pub fn free_user_pagetables(level_4_physaddr: u64) {
     let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
 
-    free_pages_rec(memory_info.phys_memory_offset,
-                   &mut memory_info.frame_allocator,
-                   PhysAddr::new(level_4_physaddr),
-                   4);
+    free_pages_rec(memory_info.phys_memory_offset,&mut memory_info.frame_allocator,PhysAddr::new(level_4_physaddr),4);
 }
-//pub fn free_user_pagetables(level_4_physaddr: u64) {
-//    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-//
-//    fn free_pages_rec(physical_memory_offset: VirtAddr,frame_allocator: &mut PageFrameAllocator,table_physaddr: PhysAddr,level: u16) {
-//        let table = unsafe{&mut *(physical_memory_offset + table_physaddr.as_u64()).as_mut_ptr() as &mut PageTable};
-//        for entry in table.iter() {
-//            if !entry.is_unused() {
-//                if (level == 1) || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-//                    // Maps a frame, not a page table
-//                    if entry.flags().contains(PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE) {
-//                        // A user frame => deallocate
-//                        frame_allocator.deallocate_frame(entry.frame().unwrap());
-//                    }
-//                } else {
-//                    // A page table
-//                    free_pages_rec(physical_memory_offset,frame_allocator,entry.addr(),level - 1);
-//                }
-//            }
-//        }
-//        // Free page table
-//        frame_allocator.deallocate_frame(
-//            PhysFrame::from_start_address(table_physaddr).unwrap());
-//    }
-//
-//    free_pages_rec(memory_info.phys_memory_offset,&mut memory_info.frame_allocator,PhysAddr::new(level_4_physaddr),4);
-//}
-//
 
 
-
-
-
-/// Allocates a consecutive set of frames
-///
-/// start_addr      Starting virtual address in page table
-/// num_frames      Number of consecutive frames
-/// max_physaddr    Maximum physical address
-///                 e.g 32-bit addressable 0xFFFF_FFFF
-//pub fn create_sequential_pages(level_4_physaddr: u64,start_addr: VirtAddr,num_frames: u64,max_physaddr: u64)-> Result<PhysAddr, MapToError<Size4KiB>> {
-//
-//    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-//    let frame_allocator = &mut memory_info.frame_allocator;
-//
-//    // Try to allocate a consecutive set of frames
-//    let start_frame = frame_allocator.allocate_consecutive_frames(num_frames, max_physaddr).ok_or(MapToError::FrameAllocationFailed)?;
-//
-//    let frame_range = PhysFrame::range(start_frame, start_frame + num_frames);
-//
-//    let page_range = {
-//        let start_page = Page::containing_address(start_addr);
-//        Page::range(start_page, start_page + num_frames)
-//    };
-//
-//    let l4_table: &mut PageTable = unsafe {
-//        &mut *(memory_info.phys_memory_offset
-//               + level_4_physaddr).as_mut_ptr()};
-//
-//    let mut mapper = unsafe {
-//        OffsetPageTable::new(l4_table,
-//                             memory_info.phys_memory_offset)};
-//
-//    for (page, frame) in page_range.zip(frame_range) {
-//        println!("[!] - Page: {:?} -> Frame: {:?}", page, frame);
-//
-//        unsafe {
-//            mapper.map_to_with_table_flags(page,frame,
-//                                           // Writeable by user
-//                                           PageTableFlags::PRESENT |
-//                                           PageTableFlags::WRITABLE |
-//                                           PageTableFlags::USER_ACCESSIBLE,
-//                                           // Parent table flags include writable
-//                                           PageTableFlags::PRESENT |
-//                                           PageTableFlags::WRITABLE |
-//                                           PageTableFlags::USER_ACCESSIBLE,
-//                                           frame_allocator)?.flush()
-//        };
-//    }
-//    Ok(start_frame.start_address())
-//}
-const MEMORY_CHUNK_L4_ENTRY: usize = 5;
-const MEMORY_CHUNK_L3_FIRST: usize = 1;
-const MEMORY_CHUNK_L3_LAST: usize = 511;
-
-/// Find the starting address of an available chunk of pages
-///
-/// Returns the index and virtual address of the start of the chunk
-/// or None if no chunks available
-//pub fn find_available_page_chunk(level_4_physaddr: u64) -> Option<VirtAddr> {
-//
-//    let memory_info = unsafe {MEMORY_INFO.as_mut().unwrap()};
-//
-//    let l4_table: &mut PageTable = unsafe {
-//        &mut *(memory_info.phys_memory_offset
-//               + level_4_physaddr).as_mut_ptr()};
-//    let l4_entry = &mut l4_table[MEMORY_CHUNK_L4_ENTRY];
-//
-//    if l4_entry.is_unused() {
-//        // L3 table not allocated -> Create
-//        let (_new_table_ptr, new_table_physaddr) = create_pagetable();
-//        l4_entry.set_addr(PhysAddr::new(new_table_physaddr),
-//                          PageTableFlags::PRESENT |
-//                          PageTableFlags::WRITABLE |
-//                          PageTableFlags::USER_ACCESSIBLE);
-//    }
-//    let l3_table: &PageTable = unsafe {
-//        & *(memory_info.phys_memory_offset
-//            + l4_entry.addr().as_u64()).as_ptr()};
-//
-//    // Each entry in l3_table from FIRST to LAST inclusive
-//    // is a separate chunk
-//    for ind in MEMORY_CHUNK_L3_FIRST..=MEMORY_CHUNK_L3_LAST {
-//        let entry = &l3_table[ind];
-//        if entry.is_unused() {
-//            // Found an empty chunk
-//            // Convert L4 and L3 index into virtual address
-//            return Some(VirtAddr::new(((MEMORY_CHUNK_L4_ENTRY as u64) << 39) |
-//                                      (ind << 30) as u64));
-//        }
-//    }
-//    None
-//}
-//
 
 
 /// Creates on-demand pages for user space in the memory.

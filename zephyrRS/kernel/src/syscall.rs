@@ -42,6 +42,7 @@ pub const SYSCALL_YEILD: u64 = 5;
 /// and enabling the System Call Extensions (SCE) for syscall/sysret opcodes.
 pub fn init() {
     let handler_addr = handle_syscall as *const () as u64;
+    //https://wiki.osdev.org/Model_Specific_Registers
     unsafe {
         // Enable System Call Extensions 
         asm!("mov ecx, 0xC0000080",
@@ -64,14 +65,14 @@ pub fn init() {
 
         asm!(
             "xor rax, rax",
-            "mov rdx, 0x230008", // use seg selectors 8, 16 for syscall and 43, 51 for sysret
+            "mov rdx, 0x230008", 
             "wrmsr",
             in("rcx") MSR_STAR);
 
 
         asm!(
             "mov eax, edx",
-            "shr rdx, 32", // Shift high bits into EDX
+            "shr rdx, 32", 
             "wrmsr",
             in("rcx") MSR_KERNEL_GS_BASE,
             in("rdx") gdt::tss_addr()
@@ -85,29 +86,26 @@ pub fn init() {
 extern "C" fn handle_syscall() {
     unsafe {
         asm!(
-            // Here should switch stack to avoid messing with user stack
-            // swapgs seems to be a way to do this
+            // switch to a syscall specific stack
             // - https://github.com/redox-os/kernel/blob/master/src/arch/x86_64/interrupt/syscall.rs#L65
             // - https://www.felixcloutier.com/x86/swapgs
 
             "swapgs", // Put the TSS address into GS (stored in syscalls::init)
-            "mov gs:{tss_temp}, rsp", // Save user stack pointer in TSS entry
+            "mov gs:{tss_temp}, rsp", // Save user space stack pointer
 
-            "mov rsp, gs:{tss_timer}", // Get kernel stack pointer
+            "mov rsp, gs:{tss_timer}", // load kernel stack pointer
             "sub rsp, {ks_offset}", // Use a different location than timer interrupt
 
             // Create an Exception stack frame
-            "sub rsp, 8", // To be replaced with SS
-            "push gs:{tss_temp}", // User stack pointer
+            "sub rsp, 8", 
+            "push gs:{tss_temp}",
             "swapgs", // Put TSS address back
-
-            // Could re-enable interrupts here?
 
             "push r11", // Caller's RFLAGS
             "sub rsp, 8",  // CS
             "push rcx", // Caller's RIP
 
-            // Create the remainder of the Context struct
+            // Push all of the context registers to this new stack
             "push rax",
             "push rbx",
             "push rcx",
@@ -128,14 +126,12 @@ extern "C" fn handle_syscall() {
             "push r15",
 
             // Call the rust dispatch_syscall function
-            // C calling convention so arguments are in registers
-            // RDI, RSI, RDX, RCX, R8, R9
-            "mov r8, rdx", // Fifth argument <- Syscall third argument
-            "mov rcx, rsi", // Fourth argument <- Syscall second argument
-            "mov rdx, rdi", // Third argument <- Syscall first argument
-            "mov rsi, rax", // Second argument is the syscall number
-            "mov rdi, rsp", // First argument is the Context address
-            "call {dispatch_fn}",
+            "mov r8, rdx", 
+            "mov rcx, rsi",
+            "mov rdx, rdi",
+            "mov rsi, rax",
+            "mov rdi, rsp",
+            "call {dispatcher}",
 
             "pop r15", // restore callee-saved registers
             "pop r14",
@@ -152,22 +148,22 @@ extern "C" fn handle_syscall() {
             "pop rdi",
 
             "pop rdx",
-            "pop rcx",
-            "pop rbx",
+            "pop rcx", // pop user return pointer
+            "pop rbx", 
             "pop rax",
 
-            "add rsp, 24", // Skip RIP, CS and RFLAGS
-            "pop rsp", // Restore user stack
+            "add rsp, 24", // Pop new syscall stack
+            "pop rsp", // Restore user stack pointer
             
             "cmp rcx, {user_code_start}",
-            "jl 2f", // rip < USER_CODE_START
-            "sysretq", // back to userland
+            "jl 2f",
+            "sysretq", // switch control to user stack
 
-            "2:", // kernel code return
+            "2:",
             "push r11",
             "popf", // Set RFLAGS
             "jmp rcx", // Jump to kernel code
-            dispatch_fn = sym dispatch_syscall,
+            dispatcher = sym dispatch_syscall,
             tss_timer = const(0x24 + gdt::TIMER_INTERRUPT_INDEX * 8),
             tss_temp = const(0x24 + gdt::SYSCALL_TEMP_INDEX * 8),
             ks_offset = const(SYSCALL_KERNEL_STACK_OFFSET),
@@ -176,59 +172,87 @@ extern "C" fn handle_syscall() {
     }
 }
 
-/// Dispatcher function that get_fdescriptor syscalls based on their ID.
+/// Dispatcher function that handles syscalls based on their ID.
 /// It redirects to the appropriate syscall handler function after setting up the execution environment.
-extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64,arg1: u64, arg2: u64, arg3:u64) {
+extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64, arg1: u64, arg2: u64, arg3: u64) {
+    // Dereference the context pointer to get a mutable reference to the Context struct.
+    let context = unsafe { &mut *context_ptr };
 
-    let context = unsafe{&mut *context_ptr};
-
-    // Set the CS and SS segment selectors
+    // Determine the appropriate code and data segment selectors based on the instruction pointer (RIP).
+    // If the RIP is below the USER_CODE_START, we are in kernel mode; otherwise, we are in user mode.
     let (code_selector, data_selector) = 
         if context.rip < process::USER_CODE_START as usize {
-            gdt::get_kernel_segments() // switching threads may overwrite permission registers
+            gdt::get_kernel_segments() // Switching threads may overwrite permission registers, so get kernel segments.
         } else {
-            gdt::get_user_segments()
+            gdt::get_user_segments() // We are in user mode, so get user segments.
         };
 
-
+    // Update the code segment (CS) and stack segment (SS) in the context.
     context.cs = code_selector.0 as usize;
     context.ss = data_selector.0 as usize;
 
+    // Dispatch to the appropriate syscall handler based on the syscall ID.
+    // The syscall ID is masked with 0xFF to get the actual ID value.
     match syscall_id & 0xFF {
-        0 => process::fork_current_thread(context),
-        1 => process::exit_current_thread(context),
-        2 => sys_write(arg1 as *const u8, arg2 as usize),
-        3 => sys_receive(context_ptr, arg1),
-        4 => sys_send(context_ptr,syscall_id, arg1, arg2,arg3),
-        5 => sys_send(context_ptr,syscall_id, arg1, arg2,arg3),
-        6 => sys_open(context_ptr, arg1 as *const u8, arg2 as usize),
-        9 => sys_yield(context_ptr),
-        _ => println!("Unknown syscall {:?} {} {} {}",context_ptr, syscall_id, arg1, arg2)
+        0 => process::fork_current_thread(context),  // Fork the current thread
+        1 => process::exit_current_thread(context),  // Exit the current thread
+        2 => sys_write(arg1 as *const u8, arg2 as usize),  // Write to a file descriptor
+        3 => sys_receive(context_ptr, arg1),  // Receive a message
+        4 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message
+        5 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message (duplicate case, consider removing)
+        6 => sys_open(context_ptr, arg1 as *const u8, arg2 as usize),  // Open a file
+        9 => sys_yield(context_ptr),  // Yield the processor
+        _ => println!("Unknown syscall {:?} {} {} {}", context_ptr, syscall_id, arg1, arg2)  // Unknown syscall
     }
 }
-pub fn send(fd: u32, value: Message) -> Result<(), u64> {
+
+/// Sends a message using a socket.
+/// 
+/// # Arguments
+/// 
+/// * `socket`: The Socket index to send the message to.
+/// * `value`: The message to send, encapsulated in a `Message` enum.
+/// 
+/// # Returns
+/// 
+/// * `Ok(())` if the message was successfully sent.
+/// * `Err(err)` if an error occurred, where `err` is the error code.
+pub fn send(socket: u32, value: Message) -> Result<(), u64> {
+    // Match the type of message to send
     match value {
+        // If the message is of type `Message::Short`
         Message::Short(data1, data2, data3) => {
+            // Variable to hold the error code returned by the syscall
             let err: u64;
+            
+            // Perform the syscall using inline assembly
             unsafe {
                 asm!("syscall",
-                     in("rax") 4 + ((fd as u64) << 32),
-                     in("rdi") data1,
-                     in("rsi") data2,
-                     in("rdx") data3,
-                     lateout("rax") err,
-                     out("rcx") _,
-                     out("r11") _);
+                     in("rax") 4 + ((socket as u64) << 32),  // RAX holds the syscall number and socket
+                     in("rdi") data1,  // RDI holds the first data field
+                     in("rsi") data2,  // RSI holds the second data field
+                     in("rdx") data3,  // RDX holds the third data field
+                     lateout("rax") err,  // RAX will hold the error code after syscall
+                     out("rcx") _,  // RCX is clobbered by syscall
+                     out("r11") _);  // R11 is clobbered by syscall
             }
-            println!("err: {}",err);
+            
+            // Print the error code for debugging purposes
+            println!("err: {}", err);
+            
+            // Check if the syscall was successful
             if err == 0 {
-                return Ok(());
+                return Ok(());  // No error, return Ok
             }
+            
+            // Return the error code if syscall failed
             Err(err)
         },
+        // For other types of messages, return an error
         _ => return Err(0)
     }
 }
+
 /// System call to write a string to the console.
 /// Given a pointer to a string and its size, this syscall prints the string to the console.
 extern "C" fn sys_write(ptr: *const u8, size:usize) {
@@ -243,136 +267,155 @@ extern "C" fn sys_write(ptr: *const u8, size:usize) {
     }
 }
 
-//extern "C" fn sys_read() {
-//    println!("read");
-//}
-//pub fn drop<T>(_x: T) { }
-//
+
+/// System call to receive a message from a socket.
+///
+/// # Arguments
+///
+/// * `context_ptr`: Pointer to the context of the current thread.
+/// * `handle`: The handle of the socket to receive from. Or index of the socket in the list
 fn sys_receive(context_ptr: *mut Context, handle: u64) {
-    // Extract the current thread
+    // Attempt to take the current thread from the scheduler
     if let Some(mut thread) = process::take_current_thread() {
-        let current_tid = thread.get_thread_id();
-        thread.set_context(context_ptr);
+        // Store the thread ID of the current thread
+        let current_thread_id = thread.get_thread_id();
+        
+        // Update the context of the current thread
+        thread.set_context(context_ptr); // This ensures that all subsequent operations within the system call are working with the most up-to-date context.
 
-
-        // Get the Socket and call
-        if let Some(rdv) = thread.get_fdescriptor(handle) {
+        // Attempt to get the socket from the thread's socket list
+        if let Some(rdv) = thread.get_sockets(handle) {
+            // Perform the receive operation on the socket
+            // This returns two threads: one to be started immediately, and one to be scheduled
             let (thread1, thread2) = rdv.write().receive(thread);
-            // thread1 should be started asap
-            // thread2 should be scheduled
 
+            // Flag to indicate whether the current thread should return immediately
             let mut returning = false;
-            for maybe_thread in [thread2, thread1] {
-                if let Some(t) = maybe_thread {
-                    if t.get_thread_id() == current_tid {
-                        // Same thread -> return
+            // After receiving the data, the function may schedule other threads for execution. If the current thread is involved in the rendezvous, it is updated and set as the current thread; otherwise, it's scheduled for later execution.
+            // If the current thread is not involved in the rendezvous, a context switch occurs to move to the next scheduled thread.
+            // Iterate through the two threads returned by the receive operation
+            for new_thread in [thread2, thread1] {
+                if let Some(t) = new_thread {
+                    if t.get_thread_id() == current_thread_id {
+                        // If the thread is the current thread, set it as the current thread and prepare to return
                         process::set_current_thread(t);
                         returning = true;
                     } else {
+                        // Otherwise, schedule the thread for later execution
                         process::schedule_thread(t);
                     }
                 }
             }
 
+            // If the current thread is not returning, schedule the next thread and switch context
             if !returning {
                 let new_context_addr = process::schedule_next(context_ptr as usize);
                 interrupts::launch_thread(new_context_addr);
             }
-        }else {
+        } else {
+            // If the handle is invalid, return an error
             thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
-            process::set_current_thread(thread);           
+            process::set_current_thread(thread);
         }
-
     }
 }
 
 
+
+/// `sys_send` is responsible for sending messages or data from one thread to another.
+/// It is part of the operating system kernel and is invoked by user-space programs.
+/// The function performs several key tasks:
+/// - Extracts the current thread and updates its context.
+/// - Retrieves the socket associated with a given handle.
+/// - Sends the message through the socket.
+/// - Manages thread scheduling based on the IPC.
 fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, data3: u64) {
     // Extract the current thread
     let handle = syscall_id >> 32;
     if let Some(mut thread) = process::take_current_thread() {
         let current_tid = thread.get_thread_id();
+        // Update the thread's context
         thread.set_context(context_ptr);
 
-        // Get the Socket and call
-        if let Some(rdv) = thread.get_fdescriptor(handle) {
-            let message = if syscall_id & MESSAGE_LONG == 0 {
-                Message::Short(data1,
-                               data2,
-                               data3)
-            } else {
-                // Long message
-
-                let message = Message::Long(
-                    data1,
-                    if syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV {
-                        // Moving or copying a handle
-                        // First copy, then drop if message is valid
-                        if let Some(rdv) = thread.get_fdescriptor(data2) {
-                            Data::Socket(rdv)
-                        } else {
-                            // Invalid handle
-                            thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
-                            process::set_current_thread(thread);
-                            return;
-                        }
+        // Retrieve the socket associated with the handle
+        if let Some(rdv) = thread.get_sockets(handle) {
+            // Prepare the message to be sent
+            
+        // Prepare the message to be sent
+        let message = if syscall_id & MESSAGE_LONG == 0 {
+            Message::Short(data1, data2, data3)
+        } else {
+            // Long message
+            // Prepare the message based on the syscall arguments and flags
+            let message = Message::Long(
+                data1,
+                // Check the type of data2 and prepare accordingly
+                if syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV {
+                    // Moving or copying a handle
+                    if let Some(rdv) = thread.get_sockets(data2) {
+                        Data::Socket(rdv)
                     } else {
-                        Data::Value(data2)
-                    },
-                    if syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV {
-                        if let Some(rdv) = thread.get_fdescriptor(data3) {
-                            Data::Socket(rdv)
-                        } else {
-                            // Invalid handle.
-                            // If we moved data2 we would have to put it back here
-                            thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
-                            process::set_current_thread(thread);
-                            return;
-                        }
+                        // Invalid handle, return an error
+                        thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
+                        process::set_current_thread(thread);
+                        return;
+                    }
+                } else {
+                    Data::Value(data2)
+                },
+                // Check the type of data3 and prepare accordingly
+                if syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV {
+                    if let Some(rdv) = thread.get_sockets(data3) {
+                        Data::Socket(rdv)
                     } else {
-                        Data::Value(data3)
-                    });
-                // Message is valid => Remove get_fdescriptor being moved
-                if (syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV) &&
-                    (syscall_id & MESSAGE_DATA2_MOVE != 0) {
-                        let _ = thread.take_socket(data2);
+                        // Invalid handle, return an error
+                        thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
+                        process::set_current_thread(thread);
+                        return;
                     }
-                if (syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV) &&
-                    (syscall_id & MESSAGE_DATA3_MOVE != 0) {
-                        let _ = thread.take_socket(data3);
-                    }
-                message
-            };
+                } else {
+                    Data::Value(data3)
+                }
+            );
+            // If the message is valid, remove any handles that are being moved
+            if (syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV) && (syscall_id & MESSAGE_DATA2_MOVE != 0) {
+                let _ = thread.take_socket(data2);
+            }
+            if (syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV) && (syscall_id & MESSAGE_DATA3_MOVE != 0) {
+                let _ = thread.take_socket(data3);
+            }
+            message
+        };
 
+            // Send the message and get the threads involved in the rendezvous
             let (thread1, thread2) = match syscall_id & 0xFF {
-                4 => rdv.write().send_message(Some(thread),message),
-                5 => rdv.write().send_receive(thread,message),
+                4 => rdv.write().send_message(Some(thread), message),
+                5 => rdv.write().send_receive(thread, message),
                 _ => panic!("Internal error")
             };
-            // thread1 should be started asap
-            // thread2 should be scheduled
 
+            // Determine which threads should be scheduled or returned
             let mut returning = false;
             for maybe_thread in [thread2, thread1] {
                 if let Some(t) = maybe_thread {
                     if t.get_thread_id() == current_tid {
-                        // Same thread -> return
+                        // The current thread is involved, so return it
                         process::set_current_thread(t);
                         returning = true;
                     } else {
+                        // Schedule the other thread for execution
                         process::schedule_thread(t);
                     }
                 }
             }
 
+            // If the original thread is not returning, switch context
             if !returning {
-                // Original thread is waiting.
-                // Switch to a different thread
                 let new_context_addr = process::schedule_next(context_ptr as usize);
                 interrupts::launch_thread(new_context_addr);
             }
         } else {
-            // Missing handle
+            // Handle is missing, return an error
             thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
             process::set_current_thread(thread);
         }

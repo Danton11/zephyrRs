@@ -11,39 +11,36 @@ use crate::syscall;
 //
 
 
-pub const MESSAGE_TYPE_KEY: u64 = 0; 
+// Constant key for identifying message types
+pub const MESSAGE_TYPE_KEY: u64 = 0;
 
-
-/// Represents the possible states of a socket during message passing.
+/// Enum representing the various states a socket can be in during message passing.
 pub enum Socket {
-    /// The socket is currently not being used.
+    /// The socket is currently idle and not being used for any operations.
     Empty,
-    /// The socket is being used for sending a message but hasn't been paired with a receiver yet.
+    /// The socket is in the process of sending a message but hasn't found a matching receiver yet.
     Sending(Option<Box<Thread>>, Message),
-    /// The socket is waiting for a message. Optionally restricted to a specific sender thread.
+    /// The socket is in a state of waiting to receive a message. Optionally, it may be waiting for a specific sender.
     Receiving(Box<Thread>, Option<u64>),
-    /// The socket is being used for both sending a message and then receiving a reply.
+    /// The socket is being used for a send-and-receive operation, typically used in request-reply patterns.
     SendReceiving(Box<Thread>, Message),
 }
 
-
-/// Represents the data types that can be part of a message.
+/// Enum representing the types of data that can be part of a message.
 pub enum Data {
-    /// A simple 64-bit value.
+    /// Represents a simple 64-bit value.
     Value(u64),
-    /// A reference to another socket, which allows for creating more complex communication patterns.
-    Socket(Arc<RwLock<Socket>>)
+    /// Represents a reference to another socket, facilitating complex communication patterns.
+    Socket(Arc<RwLock<Socket>>),
 }
 
-/// Represents a message that can be sent through the socket.
+/// Enum representing the structure of a message.
 pub enum Message {
-    /// A short message comprising three 64-bit values.
-    Short(u64,u64,u64),
-    /// A longer message with two pieces of data.
-    Long(u64, Data, Data)
+    /// A short message containing three 64-bit values.
+    Short(u64, u64, u64),
+    /// A longer message containing two pieces of data.
+    Long(u64, Data, Data),
 }
-
-
 impl Socket {
     /// Tries to send a message using the socket.
     ///
