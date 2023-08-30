@@ -322,135 +322,118 @@ fn sys_receive(context_ptr: *mut Context, handle: u64) {
 
 
 
-/// `sys_send` is responsible for sending messages or data from one thread to another.
-/// It is part of the operating system kernel and is invoked by user-space programs.
-/// The function performs several key tasks:
-/// - Extracts the current thread and updates its context.
-/// - Retrieves the socket associated with a given handle.
+
+/// `sys_send` is a system call function responsible for inter-process communication (IPC) between threads.
+/// It allows one thread to send a message to another thread via a socket.
+/// 
+/// Key Responsibilities:
+/// - Extracts the current thread from the scheduler and updates its execution context.
+/// - Retrieves the socket (rendezvous point) associated with the given handle.
 /// - Sends the message through the socket.
-/// - Manages thread scheduling based on the IPC.
+/// - Manages the scheduling of threads based on the IPC operation.
 fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, data3: u64) {
-    // Extract the current thread
+    // Extract the handle from the upper 32 bits of the syscall_id
     let handle = syscall_id >> 32;
+
+    // Attempt to take the current thread from the scheduler
     if let Some(mut thread) = process::take_current_thread() {
+        // Store the thread ID for later comparison
         let current_tid = thread.get_thread_id();
-        // Update the thread's context
+
+        // Update the execution context of the current thread
+        // This is crucial for maintaining the state of the thread across syscalls
         thread.set_context(context_ptr);
 
-        // Retrieve the socket associated with the handle
+        // Attempt to retrieve the socket (rendezvous point) associated with the handle
         if let Some(rdv) = thread.get_sockets(handle) {
-            // Prepare the message to be sent
-            
-        // Prepare the message to be sent
-        let message = if syscall_id & MESSAGE_LONG == 0 {
-            Message::Short(data1, data2, data3)
-        } else {
-            // Long message
-            // Prepare the message based on the syscall arguments and flags
-            let message = Message::Long(
-                data1,
-                // Check the type of data2 and prepare accordingly
-                if syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV {
-                    // Moving or copying a handle
-                    if let Some(rdv) = thread.get_sockets(data2) {
-                        Data::Socket(rdv)
-                    } else {
-                        // Invalid handle, return an error
-                        thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
-                        process::set_current_thread(thread);
-                        return;
-                    }
-                } else {
-                    Data::Value(data2)
-                },
-                // Check the type of data3 and prepare accordingly
-                if syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV {
-                    if let Some(rdv) = thread.get_sockets(data3) {
-                        Data::Socket(rdv)
-                    } else {
-                        // Invalid handle, return an error
-                        thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
-                        process::set_current_thread(thread);
-                        return;
-                    }
-                } else {
-                    Data::Value(data3)
-                }
-            );
-            // If the message is valid, remove any handles that are being moved
-            if (syscall_id & MESSAGE_DATA2_TYPE == MESSAGE_DATA2_RDV) && (syscall_id & MESSAGE_DATA2_MOVE != 0) {
-                let _ = thread.take_socket(data2);
-            }
-            if (syscall_id & MESSAGE_DATA3_TYPE == MESSAGE_DATA3_RDV) && (syscall_id & MESSAGE_DATA3_MOVE != 0) {
-                let _ = thread.take_socket(data3);
-            }
-            message
-        };
+            // Create a 'Short' message using the syscall arguments
+            let message = Message::Short(data1, data2, data3);
 
-            // Send the message and get the threads involved in the rendezvous
+            // Perform the send operation and get the threads that are involved in the rendezvous
+            // This could either be a simple send or a send-and-receive operation
             let (thread1, thread2) = match syscall_id & 0xFF {
                 4 => rdv.write().send_message(Some(thread), message),
                 5 => rdv.write().send_receive(thread, message),
-                _ => panic!("Internal error")
+                _ => panic!("Internal error: Unknown IPC operation")
             };
 
-            // Determine which threads should be scheduled or returned
+            // This flag will be used to determine whether the current thread should continue executing or yield to another thread.
+            // 
             let mut returning = false;
+
+            // Loop through the threads involved in the rendezvous
+            // The loop iterates over an array containing thread2 and thread1, which are the threads involved in the rendezvous (message sending operation).
             for maybe_thread in [thread2, thread1] {
+                //Check if the thread is not None
                 if let Some(t) = maybe_thread {
+                    // If this thread is the current thread, set it back to the scheduler
                     if t.get_thread_id() == current_tid {
-                        // The current thread is involved, so return it
                         process::set_current_thread(t);
                         returning = true;
                     } else {
-                        // Schedule the other thread for execution
+                        // Otherwise, schedule this thread for future execution
                         process::schedule_thread(t);
                     }
                 }
             }
 
-            // If the original thread is not returning, switch context
+            // If the original thread is not among those returning, switch to a different thread
             if !returning {
                 let new_context_addr = process::schedule_next(context_ptr as usize);
                 interrupts::launch_thread(new_context_addr);
             }
         } else {
-            // Handle is missing, return an error
+            // If the handle is invalid, set an error code and return the thread to the scheduler
             thread.return_error(SYSCALL_ERROR_INVALID_HANDLE);
             process::set_current_thread(thread);
         }
     }
 }
 
+
+// The `sys_yield` function is responsible for yielding the CPU from the current thread,
+// allowing the scheduler to pick the next thread for execution.
 fn sys_yield(context_ptr: *mut Context) {
+    // Schedule the next thread to run. The function `schedule_next` will return the stack pointer
+    // of the next thread that should be executed.
     let next_stack = process::schedule_next(context_ptr as usize);
+
+    // Switch to the next thread. The `launch_thread` function will perform the actual
+    // context switch, setting the CPU registers to the values saved in the next thread's context.
     interrupts::launch_thread(next_stack);
 }
 
-fn sys_open(context_ptr: *mut Context,ptr: *const u8,len: usize) {
+// The `sys_open` function is responsible for opening a file or resource specified by a path.
+// It updates the thread's context to return a handle to the opened resource or an error code.
+fn sys_open(context_ptr: *mut Context, ptr: *const u8, len: usize) {
+    // Dereference the context pointer to get a mutable reference to the thread's context.
+    let context = unsafe { &mut (*context_ptr) };
 
-    let context = unsafe {&mut (*context_ptr)};
-
-    // Check input length
+    // Check if the length of the input string is zero. If it is, return an error code 5.
     if len == 0 {
         context.rax = 5;
         return;
     }
-    // Convert raw pointer to a slice
-    let u8_slice = unsafe {slice::from_raw_parts(ptr, len)};
 
+    // Convert the raw pointer to a slice of u8. This slice represents the path string.
+    let u8_slice = unsafe { slice::from_raw_parts(ptr, len) };
+
+    // Attempt to convert the u8 slice to a UTF-8 string.
     if let Ok(path_string) = str::from_utf8(u8_slice) {
+        // Try to open the path. The `open_path` function will return either a handle to the opened
+        // resource or an error code.
         match process::open_path(context, &path_string) {
             Ok(handle) => {
-                context.rax = 0; // No error
-                context.rdi = handle; // Return handle
+                context.rax = 0; // Indicate that no error occurred.
+                context.rdi = handle; // Return the handle to the opened resource.
             }
             Err(error_code) => {
+                // An error occurred while trying to open the path. Return the error code.
                 context.rax = error_code;
             }
         }
     } else {
-        // Bad utf8 conversion
+        // The u8 slice could not be converted to a UTF-8 string. Return an error code 6.
         context.rax = 6;
     }
 }

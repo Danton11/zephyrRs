@@ -1,6 +1,6 @@
 use x86_64::{VirtAddr, PhysAddr};
 use x86_64::instructions::interrupts;
-use x86_64::structures::paging::PageTableFlags;
+use x86_64::structures::paging::{PageTableFlags, PageTable};
 use spin::RwLock;
 use lazy_static::lazy_static;
 extern crate alloc;
@@ -215,27 +215,6 @@ impl Thread {
                 context.rsi = data2 as usize;
                 context.rdx = data3 as usize;
             },
-            Message::Long(data1, data2, data3) => {
-                context.rdi = data1 as usize;
-
-                context.rsi = match data2 {
-                    Data::Value(value) => value,
-                    Data::Socket(rdv) => {
-                        context.rax |= (syscall::MESSAGE_DATA2_RDV |
-                                        syscall:: MESSAGE_LONG) as usize;
-                        self.give_socket(rdv)
-                    }
-                } as usize;
-
-                context.rdx = match data3 {
-                    Data::Value(value) => value,
-                    Data::Socket(rdv) => {
-                        context.rax |= (syscall::MESSAGE_DATA3_RDV |
-                                        syscall::MESSAGE_LONG) as usize;
-                        self.give_socket(rdv)
-                    }
-                } as usize;   
-            }
         }
     }
 //    pub fn memory_usage(&self) -> (u64, u64) {
@@ -371,55 +350,69 @@ Execution:
     }
 }
 
-// Function to spawn a new kernel thread, initializing its context and adding it to the scheduling queue.
-// create a kernel thread within the kernel stack space
+
+// Function to spawn a new kernel thread.
+// This function initializes the thread's context and adds it to the scheduling queue.
 pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socket>>>) -> u64 {
-    let  new_thread = {
+    // Create a new thread object
+    let new_thread = {
+        // Allocate kernel stack and user stack within the same memory region
         let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE + USER_STACK_SIZE);
         let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
         let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
         let user_stack_end = kernel_stack_end + (USER_STACK_SIZE as u64);
 
+        // Generate a unique thread ID
         let uid = unique_id();
+
+        // Initialize the thread object
         Box::new(Thread {
             thread_id: uid,
-            process: Arc::new(RwLock::new(Process { page_table_physaddr: 0, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: Arc::new(RwLock::new(Vec::new()))})),
+            process: Arc::new(RwLock::new(Process { 
+                page_table_physaddr: 0, 
+                sockets: sockets.drain(..).map(|h| Some(h)).collect(), 
+                mounts: Arc::new(RwLock::new(Vec::new()))
+            })),
             kernel_stack,
             kernel_stack_end,
             context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
             user_stack_end,
             page_table_phys: 0,
             thread_type: ThreadType::Kernel,
-
         })
     };
 
-    // Cast context address to Context struct
+    // Get a mutable ref to thread;s Context
     let context = new_thread.context_mut();
 
-    // Set the instruction pointer
+    // Set the instruction pointer to the function to be executed by the thread
+    // provides the thread with a function to run
     context.rip = function as usize;
 
-    // Set flags
+    // Set processor flags; 0x200 enables interrupts
     context.rflags = 0x200;
 
-    // Set segment selector flags
+    // Set segment selectors for code and data
     let (code_selector, data_selector) = gdt::get_kernel_segments();
     context.cs = code_selector.0 as usize;
     context.ss = data_selector.0 as usize;
 
-    // The kernel thread has its own stack
-    // Note: Need to point to the end of the memory region
-    //       because the stack moves down in memory
+    // Set the stack pointer to the end of the user stack
     context.rsp = new_thread.user_stack_end as usize;
 
+    // Get the thread ID for return
     let thread_id = new_thread.thread_id;
-    
+
+    // Monitor the new thread (for debugging or logging)
     monitor(&new_thread);
-    //println!("New kernel thread {}", new_thread);
+
+    // Print thread details (for debugging or logging)
     new_thread.print_details();
 
+    // Add the new thread to the scheduling queue
     schedule_thread(new_thread);
+
+    // Return the unique thread ID
     thread_id
 }
 
@@ -431,27 +424,38 @@ pub fn schedule_thread(thread: Box<Thread>) {
     });
 }
 
-/// Ensures that the original page table is restored after the closure finishes.
-fn with_pagetable<F, R>(page_table_physaddr: u64, func: F) -> R where
-    F: FnOnce() -> R {
-    // Store the page table and switch back before returning
+
+// The `switch_pagetable_and_execute` function is responsible for temporarily switching to a different page table,
+// executing a closure, and then switching back to the original page table.
+// This is useful for operations that need to be performed in a different address space.
+//
+// The function takes two arguments:
+// 1. `page_table_physaddr`: The physical address of the new page table to switch to.
+// 2. `func`: The closure to execute while the new page table is active.
+//
+// The function returns the result of the closure execution.
+//
+// Type Parameters:
+// - F: The type of the closure.
+// - R: The return type of the closure.
+fn switch_pagetable_and_execute<F, R>(page_table_physaddr: u64, func: F) -> R where F: FnOnce() -> R {
+    // Store the physical address of the currently active page table.
+    // This will be used to restore the original state.
     let original_page_table = memory::active_pagetable_physaddr();
 
-    // Switch to the new user page table
-    //
-    // Note: We don't need to turn off interrupts because
-    // schedule_next() saves th;e page table for each thread. This
-    // thread temporarily has a different page table to the other
-    // threads.
+    // Switch to the new page table specified by `page_table_physaddr`.
     memory::switch_to_pagetable(page_table_physaddr);
 
+    // Execute the closure `func` while the new page table is active.
     let result = func();
 
-    // Switch back to original page table
+    // Restore the original page table after the closure has been executed.
     memory::switch_to_pagetable(original_page_table);
 
+    // Return the result of the closure execution.
     result
 }
+
 
 // A struct representing the parameters required to spawn a user thread.
 pub struct Params { 
@@ -463,6 +467,187 @@ pub struct Params {
     pub mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>> 
 }
 
+
+fn validate_binary(bin: &[u8]) -> bool {
+    const MAGIC_BYTES: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+    // Check if the provided binary starts with the expected ELF magic bytes.
+    if bin[0..4] != MAGIC_BYTES {
+        false
+    } else {
+        true
+    }
+}
+
+
+// Parses the ELF binary using the object crate
+fn parse_elf_binary(bin: &[u8]) -> Result<object::File<'_>, &'static str> {
+    object::File::parse(bin).map_err(|_| "Could not parse ELF")
+}
+
+/// Allocates heap for the user process.
+///
+/// # Arguments
+///
+/// * `user_pt_phys` - The physical address of the user's page table.
+///
+/// # Returns
+///
+/// * `Result<(), &'static str>` - Returns Ok if the heap is successfully allocated, otherwise returns an Err.
+fn allocate_user_heap(user_pt_phys: u64) -> Result<(), &'static str> {
+    // Define the start and end addresses of the user heap.
+    // These should be constants defined in your memory management module.
+    let heap_start = VirtAddr::new(USER_HEAP_START);
+    let heap_size = USER_HEAP_SIZE;
+
+    // Create on-demand pages for the heap.
+    // This function should mark a range of virtual addresses as "on-demand"
+    // so that actual pages will be allocated when first accessed.
+    if memory::create_user_ondemand_pages(user_pt_phys, heap_start, heap_size).is_err() {
+        return Err("Couldn't allocate on-demand pages for user heap");
+    }
+
+    Ok(())
+}
+
+
+/// Loads an ELF binary into memory.
+///
+/// # Arguments
+///
+/// * `bin` - The ELF binary data.
+/// * `user_pt_phys` - The physical address of the user's page table.
+///
+/// # Returns
+///
+/// * `Result<(), &'static str>` - Returns Ok if the binary is successfully loaded, otherwise returns an Err.
+fn load_binary_into_memory(obj:&object::File, user_pt_phys: u64, user_pt_ptr: *mut PageTable) -> Result<(), &'static str> {
+    let entry_point = obj.entry();
+    // Iterate over each segment in the ELF binary.
+    for segment in obj.segments() {
+        let segment_address = segment.address() as u64;
+
+        let start_address = VirtAddr::new(segment_address);
+        let end_address = start_address + segment.size() as u64;
+
+        // Verify that the segment's memory range is within the allowed user code range.
+        // For example, if USER_CODE_START is 0x400000, and USER_CODE_END is 0x800000,
+        // then any segment outside this range would be rejected.
+        if (start_address < VirtAddr::new(USER_CODE_START))
+            || (end_address >= VirtAddr::new(USER_CODE_END)) {
+                return Err("ELF segment outside allowed range");
+            }
+
+        // Reserve memory for the segment in the pagetable.
+        if memory::allocate_pages(user_pt_ptr,
+                                  start_address,
+                                  segment.size() as u64, // Size in bytes
+                                  PageTableFlags::PRESENT |
+                                  PageTableFlags::WRITABLE |
+                                  PageTableFlags::USER_ACCESSIBLE).is_err() {
+            return Err("Could not allocate memory");
+        }
+
+
+        // Activate the user pagetable for the current CPU. (switch to user mode) 
+        memory::switch_to_pagetable(user_pt_phys);
+
+        // Retrieve and validate segment data.
+        if let Ok(data) = segment.data() {
+            if data.len() > segment.size() as usize {
+                return Err("ELF data length > segment size");
+            } else if data.len() > 0 {
+                // Copy the segment data to its respective address in memory.
+                let dest_ptr = segment_address as *mut u8;
+                for (i, value) in data.iter().enumerate() {
+                    unsafe {
+                        let ptr = dest_ptr.add(i);
+                        core::ptr::write(ptr, *value);
+                    }
+                }
+            }
+        } else {
+            return Err("Could not get segment data");
+        }
+    }
+    Ok(())
+}
+
+/// Initializes a new thread.
+///
+/// # Arguments
+///
+/// * `entry_point` - The function that the thread will execute.
+/// * `user_pt_phys` - The physical address of the user's page table.
+/// * `params` - Additional parameters for thread initialization.
+///
+/// # Returns
+///
+/// * `Result<Thread, &'static str>` - Returns a new `Thread` object if successful, otherwise returns an error.
+fn initialise_thread(entry_point: u64, user_pt_phys: u64, user_pt_ptr: *mut PageTable, params: Params) -> Result<u64, &'static str> {
+    let uid = unique_id();  // Generate a unique ID for the thread.
+
+    // Create the new Thread struct
+    let new_thread = {
+        // Allocate a kernel stack for the thread. This is to stave the user stack on
+        // interrupt call or system call when we need to switch into kernel mode...
+        let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
+        let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
+        let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
+
+        // Allocate a user stack for the thread. 
+        // The user stack is used when the thread executes in user mode.
+        let (_user_stack_start, user_stack_end) = memory::allocate_user_stack(user_pt_ptr)?;
+        println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
+        serial_println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
+
+        // Extract file descriptors for the thread.
+        let mut sockets = params.sockets;
+
+        // Construct the thread object.
+        Box::new(Thread {
+            thread_id:  uid,
+            process: Arc::new(RwLock::new(Process {page_table_physaddr: user_pt_phys, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
+            page_table_phys: user_pt_phys,
+            kernel_stack,
+            kernel_stack_end,
+            user_stack_end,
+            context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
+            // User stack needs new pages, not allocated on the kernel heap
+            thread_type: ThreadType::User,
+            
+        })
+    };
+
+    // Update the execution context to point to the ELF binary's entry point.
+    let context = new_thread.context_mut();
+    context.rip = entry_point as usize;
+    context.rflags = 0x0200; // Interrupt enable
+
+    // Set the code and data segment selectors for user mode execution.
+    let (code_selector, data_selector) = gdt::get_user_segments();
+    context.cs = code_selector.0 as usize; // Code segment flags
+    context.ss = data_selector.0 as usize; // Without this we get a GPF
+
+    
+    // Set the stack pointer to the end of the allocated user stack. (start when growing up)
+    context.rsp = new_thread.user_stack_end as usize;
+
+    // Pass memory details to the thread through registers.
+    context.rax = USER_HEAP_START as usize;
+    context.rcx = USER_HEAP_SIZE as usize;
+
+    monitor(&new_thread);
+    // Print thread details for debugging purposes.
+    let thread_id = new_thread.thread_id;
+    new_thread.print_details();
+
+
+    // Add the new thread to the scheduler for execution.
+    schedule_thread(new_thread);
+
+    Ok(thread_id)
+
+}
 // Function to spawn a user thread, which involves setting up its memory, parsing the ELF binary, and initializing its context.
 // // Spawns a user-level thread by:
 // 1. Setting up its memory.
@@ -475,17 +660,21 @@ pub struct Params {
 // Returns: 
 // - `Ok(u64)`: Successfully created thread with its unique ID.
 // - `Err(&'static str)`: An error occurred during the spawning process.
-pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str> {
+pub fn spawn_user_thread(bin_file: &[u8],params: Params) -> Result<u64, &'static str> {
     // https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
     // The magic bytes are the first four bytes in an ELF file.
-    const MAGIC_BYTES: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
-    // Check if the provided binary starts with the expected ELF magic bytes.
-    if bin[0..4] != MAGIC_BYTES {
-        return Err("ELF FILE NOT FOUND");
-    }
-    
-    if let Ok(obj) = object::File::parse(bin) {
+        // Validate the binary format
+        if !validate_binary(bin_file) {
+            return Err("Invalid binary format");
+        }
+
+           // Parse the binary using object crate
+        let obj_result = parse_elf_binary(bin_file);
+        if obj_result.is_err() {
+            return Err("Failed to parse ELF");
+        }
+        let obj = obj_result.unwrap();
 
         // Create a user pagetable that includes only kernel pages.
         let (user_page_table_ptr, user_page_table_physaddr) = memory::create_kernel_only_pagetable();
@@ -493,135 +682,27 @@ pub fn spawn_user_thread(bin: &[u8],params: Params) -> Result<u64, &'static str>
 
         // Allocate user heap memory. This is memory reserved for dynamic allocations 
         // during the execution of the user thread (e.g., when `malloc` is called).
-        if memory::create_user_ondemand_pages(
-            user_page_table_physaddr,
-            VirtAddr::new(USER_HEAP_START),
-            USER_HEAP_SIZE).is_err() {
-            return Err("Not able to allocate user stack...");
-        }
+        allocate_user_heap(user_page_table_physaddr)?;
+
+
 
         // Switch to the user pagetable and setup the memory segments 
         // based on the parsed ELF object.
-        return with_pagetable(user_page_table_physaddr, || {
-
-            let entry_point = obj.entry();
-
-            // Iterate over each segment in the ELF binary.
-            for segment in obj.segments() {
-                let segment_address = segment.address() as u64;
-
-                let start_address = VirtAddr::new(segment_address);
-                let end_address = start_address + segment.size() as u64;
-
-                // Verify that the segment's memory range is within the allowed user code range.
-                // For example, if USER_CODE_START is 0x400000, and USER_CODE_END is 0x800000,
-                // then any segment outside this range would be rejected.
-                if (start_address < VirtAddr::new(USER_CODE_START))
-                    || (end_address >= VirtAddr::new(USER_CODE_END)) {
-                        return Err("ELF segment outside allowed range");
+        return switch_pagetable_and_execute(user_page_table_physaddr, || {
+            load_binary_into_memory(&obj, user_page_table_physaddr, user_page_table_ptr)?;
+           
+            let new_thread_id = initialise_thread(obj.entry(),  user_page_table_physaddr, user_page_table_ptr, params);
+            match new_thread_id {
+                    Ok(new_id) => {
+                        // Return the thread ID as Result<u64, &str>
+                        Ok(new_id)
+                    },
+                    Err(e) => {
+                        // Forward the error
+                        Err(e)
                     }
-
-                // Reserve memory for the segment in the pagetable.
-                if memory::allocate_pages(user_page_table_ptr,
-                                          start_address,
-                                          segment.size() as u64, // Size in bytes
-                                          PageTableFlags::PRESENT |
-                                          PageTableFlags::WRITABLE |
-                                          PageTableFlags::USER_ACCESSIBLE).is_err() {
-                    return Err("Could not allocate memory");
                 }
-
-
-                // Activate the user pagetable for the current CPU. (switch to user mode) 
-                memory::switch_to_pagetable(user_page_table_physaddr);
-
-                // Retrieve and validate segment data.
-                if let Ok(data) = segment.data() {
-                    if data.len() > segment.size() as usize {
-                        return Err("ELF data length > segment size");
-                    } else if data.len() > 0 {
-                        // Copy the segment data to its respective address in memory.
-                        let dest_ptr = segment_address as *mut u8;
-                        for (i, value) in data.iter().enumerate() {
-                            unsafe {
-                                let ptr = dest_ptr.add(i);
-                                core::ptr::write(ptr, *value);
-                            }
-                        }
-                    }
-                } else {
-                    return Err("Could not get segment data");
-                }
-            }
-
-
-            let uid = unique_id();  // Generate a unique ID for the thread.
-
-            // Create the new Thread struct
-            let new_thread = {
-                // Allocate a kernel stack for the thread. This is to stave the user stack on
-                // interrupt call or system call when we need to switch into kernel mode...
-                let kernel_stack = Vec::with_capacity(KERNEL_STACK_SIZE);
-                let kernel_stack_start = VirtAddr::from_ptr(kernel_stack.as_ptr());
-                let kernel_stack_end = (kernel_stack_start + KERNEL_STACK_SIZE).as_u64();
-
-                // Allocate a user stack for the thread. 
-                // The user stack is used when the thread executes in user mode.
-                let (_user_stack_start, user_stack_end) = memory::allocate_user_stack(user_page_table_ptr)?;
-                println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
-                serial_println!("Thread {} allocated user stack from {:#x} to {:#x}", uid, _user_stack_start as u64, user_stack_end as u64);
-
-                // Extract file descriptors for the thread.
-                let mut sockets = params.sockets;
-
-                // Construct the thread object.
-                Box::new(Thread {
-                    thread_id:  uid,
-                    // Create a new process associated with the thread.
-                    process: Arc::new(RwLock::new(Process {page_table_physaddr: user_page_table_physaddr, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
-                    page_table_phys: user_page_table_physaddr,
-                    kernel_stack,
-                    // Note that stacks move backwards, so SP points to the end
-                    kernel_stack_end,
-                    user_stack_end,
-                    // Push a Context struct on the kernel stack
-                    context: kernel_stack_end - INTERRUPT_CONTEXT_SIZE as u64,
-                    // User stack needs new pages, not allocated on the kernel heap
-                    thread_type: ThreadType::User,
-                    
-                })
-            };
-
-            // Update the execution context to point to the ELF binary's entry point.
-            let context = new_thread.context_mut();
-            context.rip = entry_point as usize;
-            context.rflags = 0x0200; // Interrupt enable
-
-            // Set the code and data segment selectors for user mode execution.
-            let (code_selector, data_selector) = gdt::get_user_segments();
-            context.cs = code_selector.0 as usize; // Code segment flags
-            context.ss = data_selector.0 as usize; // Without this we get a GPF
-
-            
-            // Set the stack pointer to the end of the allocated user stack. (start when growing up)
-            context.rsp = new_thread.user_stack_end as usize;
-
-            // Pass memory details to the thread through registers.
-            context.rax = USER_HEAP_START as usize;
-            context.rcx = USER_HEAP_SIZE as usize;
-
-            monitor(&new_thread);
-            // Print thread details for debugging purposes.
-            let thread_id = new_thread.thread_id;
-            new_thread.print_details();
-
-
-            // Add the new thread to the scheduler for execution.
-            schedule_thread(new_thread);
-            return Ok(thread_id);
-        });
-    }
-    return Err("Could not parse ELF");
+        }).map_err(|e| "Error creating user thread");
 }
 
 // Function to create a new thread by duplicating the current thread's state.
@@ -707,172 +788,169 @@ pub fn exit_current_thread(_current_context: &mut Context) {
     }
 }
 
-pub fn schedule_next(context_addr: usize) -> usize {
 
+/// Helper function to update the current thread's context and move it to the running queue.
+fn update_current_thread(context_addr: usize, running_queue: &mut VecDeque<Box<Thread>>, current_thread: &mut Option<Box<Thread>>) {
+    if let Some(thread) = current_thread.take() {
+        monitor(&thread);
+        if thread.thread_type != ThreadType::Kernel {
+            serial_println!("[SCHEDULER] - Thread {}: Page table at {:#x}, Kernel stack at {:#x}", thread.thread_id, thread.page_table_phys, thread.kernel_stack_end);
+        }
+        let mut updated_thread = thread;
+        updated_thread.context = context_addr as u64;
+        updated_thread.page_table_phys = memory::active_pagetable_physaddr();
+        running_queue.push_back(updated_thread);
+    }
+}
+
+/// Schedules the next thread to run.
+///
+/// This function is called by the timer interrupt handler to switch the currently running thread.
+/// It updates the context of the currently running thread and moves it to the back of the queue.
+/// Then, it pops the next thread from the front of the queue and prepares it for execution.
+///
+/// # Arguments
+///
+/// * `context_addr` - The address of the saved context of the currently running thread.
+///
+/// # Returns
+///
+/// * `usize` - The address of the saved context of the next thread to run.
+pub fn schedule_next(context_addr: usize) -> usize {
+    // Lock the running queue and the current thread for writing.
     let mut running_queue = RUNNING.write();
     let mut current_thread = CURR_THREAD.write();
 
-    // If there's a currently running thread, move it to the back of the scheduling queue.
-    if let Some(thread) = current_thread.take() {
-        monitor(&thread);
-        // Log thread scheduling details if it's not a kernel thread.
-        if thread.thread_type != ThreadType::Kernel {
-            serial_println!("[!] - Scheduling thread {}: Using page table at {:#x} and kernel stack at {:#x}", thread.thread_id, thread.page_table_phys, thread.kernel_stack_end);
-        } 
-        // Update the stack pointer
-        let mut thread_mut = thread;
+    // Update the current thread and move it to the running queue.
+    update_current_thread(context_addr, &mut running_queue, &mut current_thread);
 
-        // Store context location. This should almost always be in the same
-        // location on the kernel stack. The exception is the
-        // first time a context switch occurs from the original kernel
-        // stack to the first kernel thread stack.
-        thread_mut.context = context_addr as  u64;
-
-        // Save the page table. This is to enable context
-        // switching during functions which manipulate page tables
-        // for example new_user_thread
-        thread_mut.page_table_phys = memory::active_pagetable_physaddr();
-
-        running_queue.push_back(thread_mut);
-    } 
-    // Fetch the next thread to run from the front of the queue.
+    // Pop the next thread from the front of the running queue.
     *current_thread = running_queue.pop_front();
 
+    // Prepare the next thread for execution.
     match current_thread.as_ref() {
         Some(thread) => {
             // Set the interrupt stack for the next scheduled thread.
-            gdt::set_interrupt_stack_table(
-                gdt::TIMER_INTERRUPT_INDEX as usize,
-                VirtAddr::new(thread.kernel_stack_end)  // Point to the end of the stack.
-            );
+            gdt::set_interrupt_stack_table(gdt::TIMER_INTERRUPT_INDEX as usize,VirtAddr::new(thread.kernel_stack_end));
 
             // If this isn't a kernel thread, switch to its page table.
             if thread.page_table_phys != 0 {
                 memory::switch_to_pagetable(thread.page_table_phys);
             }
 
-            // Return the context address for the next thread to be loaded by the interrupt handler.
+            // Return the saved context address for the next thread.
             thread.context as usize
         },
         None => 0  // If there's no thread to schedule, return 0.
     }
 }
 
-pub fn open_path(current_context: &mut Context,path: &str) -> Result<usize, usize> {
+
+
+
+/// Opens a file or resource specified by a path and returns a handle to it.
+///
+/// This function is called to open a file or resource specified by the given path.
+/// It checks if the path is mounted and if so, returns a handle to the resource.
+///
+/// # Arguments
+///
+/// * `current_context` - The current execution context.
+/// * `path` - The path of the file or resource to open.
+///
+/// # Returns
+///
+/// * `Result<usize, usize>` - Returns a handle to the opened resource if successful, otherwise returns an error code.
+pub fn open_path(current_context: &mut Context, path: &str) -> Result<usize, usize> {
+    // Check if there is a currently running thread
     if let Some(current_thread) = CURR_THREAD.read().as_ref() {
         println!("[!] - Thread {} opening {}", current_thread.thread_id, path);
 
+        // Lock the process for writing
         let mut process = current_thread.process.write();
 
-        let option = if let Some((_mount, rend)) = process.mounts.read().iter().find(|&(mount, _rend)| mount == path) {
-                Some(rend.clone())
-            } else {
-                None
-            };
+        // Check if the path is mounted
+        let option = if let Some((_mount, soc)) = process.mounts.read().iter().find(|&(mount, soc)| mount == path) {
+            // Clone the socket if the path is mounted
+            Some(soc.clone())
+        } else {
+            // Return None if the path is not mounted
+            None
+        };
 
-        if let Some(rv) = option {
-            let handle = process.add_handle(rv.clone());
+        // If the path is mounted, add a handle and return it
+        if let Some(sock) = option {
+            let handle = process.add_handle(sock.clone());
             return Ok(handle);
         } else {
+            // Return an error code if the path is not mounted
             return Err(7);
         }
     }
+    // Return an error code if there is no currently running thread
     Err(0)
 }
 
 
-//pub fn allocate_memory_chunk(pages_required: u64,max_physical_address: u64) -> Result<(VirtAddr, PhysAddr), usize> {
-//    // Get the current active thread.
-//    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
-//        println!("[!] - Thread {} requesting {} pages", current_thread.get_thread_id(), pages_required);
-//
-//        // Fetch a virtual address for an available chunk of pages.
-//        let chunk_start_addr = match memory::find_available_page_chunk(
-//            current_thread.page_table_phys) {
-//            Some(address) => address,
-//            None => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
-//        };
-//        if max_physical_address != 0 {
-//            // If the user specifies a max physical address, 
-//            // we need to allocate consecutive frames.
-//            let physical_start_addr = match memory::create_sequential_pages(
-//                current_thread.page_table_phys,
-//                chunk_start_addr,
-//                pages_required,
-//                max_physical_address) {
-//                Ok(phys_addr) => phys_addr,
-//                Err(_) => return Err(syscall::SYSCALL_ERROR_MEMALLOC)
-//            };
-//
-//            return Ok((chunk_start_addr, physical_start_addr));
-//        } else {
-//            // If no specific physical address range is required,
-//            // allocate frames on an on-demand basis.
-//            
-//            if memory::create_user_ondemand_pages(
-//                current_thread.page_table_phys,
-//                chunk_start_addr,
-//                pages_required).is_err() {
-//                return Err(syscall::SYSCALL_ERROR_MEMALLOC);
-//            }
-//
-//            // Since we're not ensuring sequential physical addresses, 
-//            // we return 0 for the physical address.
-//            return Ok((chunk_start_addr, PhysAddr::new(0)));
-//        }
-//    }
-//    // Return an error if no active thread is found.
-//    Err(syscall::SYSCALL_ERROR_MEMALLOC)
-//}
-
-
+// Inline function to get the current stack pointer for kernel mode.
 #[inline]
 fn get_current_stack_pointer() -> usize {
     let rsp: usize;
     unsafe {
+        // Inline assembly to move the value of the stack pointer register (rsp) into the variable rsp.
         asm!("mov {}, rsp", out(reg) rsp);
     }
     rsp
 }
 
-
+// Function to get the current user stack pointer from a saved context.
 fn get_current_user_stack_pointer_from_context(context: &Context) -> usize {
     context.rsp
 }
 
-
+// Inline function to get the current stack pointer for user mode.
 #[inline]
 fn get_current_user_stack_pointer() -> usize {
     let rsp: usize;
     unsafe {
+        // Inline assembly to move the value of the stack pointer register (rsp) into the variable rsp.
         asm!("mov {}, rsp", out(reg) rsp);
     }
     rsp
 }
 
-
+// Function to monitor the stack usage of a thread.
 pub fn monitor(thread: &Thread) {
     match thread.thread_type {
+        // For Kernel threads
         ThreadType::Kernel => {
-            if thread.thread_id == 1 || thread.thread_id == 2{
-                
-            }else {
-            let current_stack_ptr = get_current_stack_pointer();
-            let stack_usage = thread.kernel_stack_end as isize - current_stack_ptr as isize;
-            serial_println!(
-                "[STACK_MONITOR][KERNEL][Thread {}] Stack Usage: {} bytes", 
-                thread.thread_id, 
-                stack_usage
+            // Special handling for thread IDs 1 and 2 (if needed)
+            if thread.thread_id == 1 || thread.thread_id == 2 {
+                // Do nothing for these specific threads
+            } else {
+                // Get the current stack pointer
+                let current_stack_ptr = get_current_stack_pointer();
+                // Calculate stack usage
+                let stack_usage = thread.kernel_stack_end as isize - current_stack_ptr as isize;
+                // Log the stack usage
+                serial_println!(
+                    "[STACK_MONITOR][KERNEL][Thread {}] Stack Usage: {} bytes", 
+                    thread.thread_id, 
+                    stack_usage
                 );
             }
         },
+        // For User threads
         ThreadType::User => {
-            let context = thread.context_mut(); // Assuming this gives you the saved context
+            // Get the saved context of the thread
+            let context = thread.context_mut();
+            // Get the user stack pointer from the saved context
             let user_stack_ptr = get_current_user_stack_pointer_from_context(context);
-            //serial_println!("Direct user_stack_ptr: {:#x}", user_stack_ptr);
+            // Calculate stack usage
             let stack_usage = thread.user_stack_end as isize - user_stack_ptr as isize;
-
+            // Calculate stack usage as a percentage of the total stack size
             let stack_percentage = (stack_usage as f64 / (4096.0 * 10.0)) * 100.0;
+            // Log the stack usage and its percentage
             serial_println!(
                 "[STACK_MONITOR][USER][Thread {}] Stack Usage: {} bytes ({}%)" , 
                 thread.thread_id, 

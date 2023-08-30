@@ -38,9 +38,10 @@ pub enum Data {
 pub enum Message {
     /// A short message containing three 64-bit values.
     Short(u64, u64, u64),
-    /// A longer message containing two pieces of data.
-    Long(u64, Data, Data),
 }
+
+
+
 impl Socket {
     /// Tries to send a message using the socket.
     ///
