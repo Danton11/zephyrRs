@@ -1,6 +1,5 @@
 extern crate alloc;
 use linked_list_allocator::LockedHeap;
-
 use crate::println;
 
 #[global_allocator]
@@ -14,5 +13,5 @@ pub fn init(heap_start: usize, heap_size: usize) {
 // Allocator error handler
 #[alloc_error_handler]
 fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
-    panic!("allocation error: {:?}", layout)
+    panic!("Could not allocate memory to user thread: {:?}", layout)
 }
