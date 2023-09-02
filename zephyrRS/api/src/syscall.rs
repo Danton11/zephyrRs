@@ -8,8 +8,8 @@ pub const MESSAGE_TYPE_KEY: u64 = 0;
 
 // Enum representing different types of messages.
 pub enum Message {
-    // Short message type with three u64 data fields.
-    Short(u64, u64, u64),
+    // Packet message type with three u64 data fields.
+    Packet(u64, u64, u64),
 }
 
 // Implement methods for the Message enum.
@@ -18,9 +18,9 @@ impl Message {
     // Returns a Result containing the tuple if successful, or an error code otherwise.
     pub fn to_values(&self) -> Result<(u64, u64, u64, u64), u64> {
         match self {
-            // If the message is of type Short, destructure it into its components.
-            Message::Short(data1, data2, data3) => {
-                // Return the components as a tuple, prefixed with a 0 to indicate the Short message type.
+            // If the message is of type Packet, destructure it into its components.
+            Message::Packet(data1, data2, data3) => {
+                // Return the components as a tuple, prefixed with a 0 to indicate the Packet message type.
                 Ok((0, *data1, *data2, *data3))
             },
             // For other message types, return an error.
@@ -29,10 +29,10 @@ impl Message {
     }
 
     // Method to create a Message enum from four u64 values.
-    // Currently, it only supports creating Short messages.
+    // Currently, it only supports creating Packet messages.
     pub fn from_values(_ctrl: u64, data1: u64, data2: u64, data3: u64) -> Message {
-        // Create and return a Short message with the given data fields.
-        Message::Short(data1, data2, data3)
+        // Create and return a Packet message with the given data fields.
+        Message::Packet(data1, data2, data3)
     }
 }
 
@@ -96,7 +96,7 @@ pub fn thread_exit() -> ! {
 }
 
 
-// Function to receive a message from a file descriptor.
+// Function to receive a message from a socket.
 // Takes a file descriptor as an argument.
 // Returns a Result containing a Message if successful, or an error code otherwise.
 pub fn receive(socket: u64) -> Result<Message, u64> {
@@ -119,7 +119,7 @@ pub fn receive(socket: u64) -> Result<Message, u64> {
 
     // Check if there was an error during the syscall.
     if error_code == 0 {
-        return Ok(Message::Short(message_data1, message_data2, message_data3));
+        return Ok(Message::Packet(message_data1, message_data2, message_data3));
     }
 
     // Return the error code.
@@ -132,7 +132,7 @@ pub fn receive(socket: u64) -> Result<Message, u64> {
 pub fn send(socket: u32, message: Message) -> Result<(), u64> {
     // Match on the type of message to send.
     match message {
-        Message::Short(message_data1, message_data2, message_data3) => {
+        Message::Packet(message_data1, message_data2, message_data3) => {
             // Initialize a variable to hold the error code.
             let mut error_code: u64;
 
@@ -275,7 +275,7 @@ pub fn send_and_wait_for_receive(file_descriptor: u32, data1: u64, data2: u64, d
 
     loop {
         // Attempt to send and receive a message.
-        let send_receive_result = send_receive(file_descriptor, Message::Short(data1, data2, data3));
+        let send_receive_result = send_receive(file_descriptor, Message::Packet(data1, data2, data3));
 
         match send_receive_result {
             // If rendezvous is blocked, retry.
@@ -294,7 +294,7 @@ pub fn send_and_wait_for_receive(file_descriptor: u32, data1: u64, data2: u64, d
                 continue; // Retry
             }
             // If received a message, check if it matches the expected data.
-            Ok(Message::Short(received_data1, received_data2, received_data3)) => {
+            Ok(Message::Packet(received_data1, received_data2, received_data3)) => {
                 if let Some(expected_rd1) = expected_data1 {
                     if received_data1 != expected_rd1 {
                         return Err(received_data1);
@@ -302,7 +302,7 @@ pub fn send_and_wait_for_receive(file_descriptor: u32, data1: u64, data2: u64, d
                 }
                 return Ok((received_data1, received_data2, received_data3));
             }
-            // For all other cases, return an error.
+            // For all other cases, return an error 
             _ => return Err(0),
         }
     }

@@ -11,7 +11,7 @@ use api::{println, syscall, syscall::Message};
 
 fn recv_id () -> u64 {
     let thread_id = match syscall::receive(2).unwrap(){ // recv the ID of the thread through the ID_SENDING socket
-        Message::Short(value, _, _) => value,
+        Message::Packet(value, _, _) => value,
             _ => 0
     };
     thread_id
@@ -27,9 +27,10 @@ pub extern "C" fn recursive_thread() {
     recursive_function(0, thread_id);
     
     // Notify the main thread that this thread has completed
-    syscall::send(3, Message::Short(thread_id as u64, 0, 0)).unwrap();
+    syscall::send(3, Message::Packet(thread_id as u64, 0, 0)).unwrap();
     syscall::thread_exit();
 }
+
 
 fn recursive_function(depth: usize, thread_id: u64) {
     // Print the current depth to monitor the recursion
@@ -43,10 +44,36 @@ fn recursive_function(depth: usize, thread_id: u64) {
     syscall::thread_yield();
     // Recursive call
     if depth < 500 { // Limiting the depth to prevent infinite recursion
-        recursive_function(depth + 10, thread_id);
+        recursive_function(depth + 10 , thread_id);
     } 
 }
+pub extern "C" fn recursive_too_deep_thread() {
+    let thread_id = recv_id();
+    println!("[thread {}]: Starting recursive function", thread_id);
+    
+    // Start the recursion
+    recursive_too_deep_function(0, thread_id);
+    
+    // Notify the main thread that this thread has completed
+    syscall::send(3, Message::Packet(thread_id as u64, 0, 0)).unwrap();
+    syscall::thread_exit();
+}
 
+fn recursive_too_deep_function(depth: usize, thread_id: u64) {
+    // Print the current depth to monitor the recursion
+    if depth % 50 == 0 { // print every 50th depth to avoid flooding the console
+        println!("[thread {}]: Recursion depth {}", thread_id, depth);
+    }
+    
+    // Artificially use up some stack space
+    let _array: [u64; 1000] = [0; 1000]; // 100 include_bytes!("
+    
+    syscall::thread_yield();
+    // Recursive call
+    if depth < 500 { // Limiting the depth to prevent infinite recursion
+        recursive_too_deep_function(depth + 1 , thread_id);
+    } 
+}
 //Thread Stack 0x00028000021000 - 0x0002800002B000 (thread 3)
 //Thead Stacl  0x00028000031000 - 0x0002800003B000 (thread 6)
 pub extern "C" fn write_to_kernel_stack(){
@@ -78,7 +105,7 @@ pub extern "C" fn write_to_kernel_stack(){
         }
     }
 
-    syscall::send(3, Message::Short(thread_id as u64, 0, 0)).unwrap();
+    syscall::send(3, Message::Packet(thread_id as u64, 0, 0)).unwrap();
 }
 
 pub extern "C" fn tester(){
@@ -91,7 +118,7 @@ pub extern "C" fn tester(){
 
 
 
-    syscall::send(3, Message::Short(thread_id as u64, 0, 0)).unwrap();
+    syscall::send(3, Message::Packet(thread_id as u64, 0, 0)).unwrap();
 }
 
 
@@ -118,7 +145,6 @@ pub extern "C" fn heap_alloc() {
     // Memory is automatically freed here, at the end of scope
 }
 
-
 //____________________________________________________________________________
 
 //_______DANGLING POINTER EXAMPLE_________
@@ -131,7 +157,9 @@ pub extern "C" fn heap_alloc() {
 //    println!("{}", s1);  // Compile-time error
 //}
 //
-//-------Borrow error---------
+//
+
+//-------Borrow error example---------
 //pub extern "C" fn thread_func() {
 //    let thread_id = recv_id();
 //    let mut x = 5;
@@ -160,7 +188,7 @@ Input: e - (allocate some space on the heap and then free)\n
     loop{
         let message = syscall::receive(0).unwrap(); // recv from keyboard interrupt handler
         let value = match message {
-            Message::Short(_, value, _) => value,
+            Message::Packet(_, value, _) => value,
             _ => 0
         };
         let ch = char::from_u32(value as u32).unwrap();
@@ -172,6 +200,8 @@ Input: e - (allocate some space on the heap and then free)\n
             call_basic_threads(3);
         } else if ch == 'r' {
             call_recursive_threads();
+        } else if ch == 't' {
+            call_recursive_too_deep_threads()
         } else if ch == 'm' {
             call_malicious_thread();
         } else if ch == 'e' {
@@ -205,7 +235,7 @@ fn call_heap_alloc(){
     let tid = match tid_result {
         Ok(thread_id) => {
             println!("[!] - Thread spawned with ID: {}", thread_id);
-            syscall::send(2, Message::Short(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
+            syscall::send(2, Message::Packet(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
             thread_id
         },
         Err(error_code) => {
@@ -221,7 +251,7 @@ fn call_malicious_thread() {
     let tid = match tid_result {
         Ok(thread_id) => {
             println!("[!] - Thread spawned with ID: {}", thread_id);
-            syscall::send(2, Message::Short(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
+            syscall::send(2, Message::Packet(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
             thread_id
         },
         Err(error_code) => {
@@ -231,12 +261,12 @@ fn call_malicious_thread() {
     };
 }
 
-fn call_recursive_threads() {
-    let tid_result = syscall::thread_spawn(recursive_thread);
+fn call_recursive_too_deep_threads() {
+    let tid_result = syscall::thread_spawn(recursive_too_deep_thread);
     let tid = match tid_result {
         Ok(thread_id) => {
             println!("[!] - Thread spawned with ID: {}", thread_id);
-            syscall::send(2, Message::Short(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
+            syscall::send(2, Message::Packet(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
             thread_id
         },
         Err(error_code) => {
@@ -245,7 +275,30 @@ fn call_recursive_threads() {
         }
     };
     match syscall::receive(3) {
-        Ok(Message::Short(thread_id, _, _)) => {
+        Ok(Message::Packet(thread_id, _, _)) => {
+            println!("[main]: Thread {} has completed", thread_id);
+        },
+        _ => {
+            println!("[main]: Unexpected message");
+        }
+    }
+
+}
+fn call_recursive_threads() {
+    let tid_result = syscall::thread_spawn(recursive_thread);
+    let tid = match tid_result {
+        Ok(thread_id) => {
+            println!("[!] - Thread spawned with ID: {}", thread_id);
+            syscall::send(2, Message::Packet(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
+            thread_id
+        },
+        Err(error_code) => {
+            println!("[!] - Failed to spawn thread. Error code: {}", error_code);
+            return; // or handle the error in another way
+        }
+    };
+    match syscall::receive(3) {
+        Ok(Message::Packet(thread_id, _, _)) => {
             println!("[main]: Thread {} has completed", thread_id);
         },
         _ => {
@@ -261,7 +314,7 @@ fn call_basic_threads(num: u64) {
             let tid = match tid_result {
                 Ok(thread_id) => {
                     println!("[!] - Thread spawned with ID: {}", thread_id);
-                    syscall::send(2, Message::Short(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
+                    syscall::send(2, Message::Packet(thread_id as u64, 0, 0)); // send to handle 2, which is the ID_SENDING socket
                     thread_id
                 },
                 Err(error_code) => {
@@ -276,7 +329,7 @@ fn call_basic_threads(num: u64) {
 // Wait for the two threads to complete
     for _ in 0..num {
         match syscall::receive(3) {
-            Ok(Message::Short(thread_id, _, _)) => {
+            Ok(Message::Packet(thread_id, _, _)) => {
                 println!("[main]: Thread {} has completed", thread_id);
             },
             _ => {

@@ -7,5 +7,5 @@ user/% : FORCE
 FORCE:
 
 .PHONY: run
-run : user/bin user/shell
+run : user/bin
 	cargo run --release --bin kernel

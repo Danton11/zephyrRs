@@ -37,7 +37,7 @@ pub enum Data {
 /// Enum representing the structure of a message.
 pub enum Message {
     /// A short message containing three 64-bit values.
-    Short(u64, u64, u64),
+    Packet(u64, u64, u64),
 }
 
 

@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec, sync::Arc, string::String};
 use core::arch::asm;
 use crate::{println, serial_println};
-use crate::boot::interrupts::{Context, INTERRUPT_CONTEXT_SIZE, keyboard_socket};
+use crate::boot::interrupts::{ISF, INTERRUPT_CONTEXT_SIZE, keyboard_socket};
 use crate::boot::gdt;
 use crate::mem::memory;
 use crate::syscall;
@@ -144,18 +144,18 @@ impl Thread {
 
     // Display function to print the details of a thread for debugging purposes.
     pub fn print_details(&self) {
-        let context = unsafe {&mut *(self.context as *mut Context)};
+        let context = unsafe {&mut *(self.context as *mut ISF)};
         let kernel_stack_start = self.kernel_stack_end - (KERNEL_STACK_SIZE as u64);
         let user_stack_start = self.user_stack_end - (USER_STACK_SIZE as u64);
-        let contextRip = context.rip;
-        let contextRsp = context.rsp;
+        let contextRip = context.instruction_pointer;
+        let contextRsp = context.stack_pointer;
 
         serial_println!("---------------- Thread Details ----------------");
         serial_println!("Thread ID:              {}", self.thread_id);
         serial_println!("Thread Type:            {:?}", self.thread_type);
         serial_println!("RIP:                    {:#016X}", contextRip);
         serial_println!("Kernel Stack  {:#016X} - {:#016X}: ({} bytes)",  kernel_stack_start, self.kernel_stack_end, KERNEL_STACK_SIZE);
-        serial_println!("Context Address:        {:#016X}", self.context);
+        serial_println!("ISF Address:        {:#016X}", self.context);
         serial_println!("Thread Stack {:#016X} - {:#016X} ({} bytes)", user_stack_start, self.user_stack_end, USER_STACK_SIZE);
         serial_println!("RSP:                    {:#016X}", contextRsp);
         serial_println!("-----------------------------------------------");
@@ -188,15 +188,15 @@ impl Thread {
     }
 
     // Functions to manipulate and retrieve the context (saved state) of a thread.
-    fn context(&self) -> &Context {
-        unsafe {& *(self.context as *const Context)}
+    fn context(&self) -> &ISF {
+        unsafe {& *(self.context as *const ISF)}
     }
 
-    pub fn context_mut(&self) -> &mut Context {
-        unsafe {&mut *(self.context as *mut Context)}
+    pub fn context_mut(&self) -> &mut ISF {
+        unsafe {&mut *(self.context as *mut ISF)}
     }
     
-    pub fn set_context(&mut self, context_ptr: *mut Context) {
+    pub fn set_context(&mut self, context_ptr: *mut ISF) {
         self.context = context_ptr as u64;
     }
     // The function 'return_error' sets an error code in the thread's context, 
@@ -210,7 +210,7 @@ impl Thread {
         let context = self.context_mut();
         context.rax = 0; // No error
         match message {
-            Message::Short(data1, data2, data3) => {
+            Message::Packet(data1, data2, data3) => {
                 context.rdi = data1 as usize;
                 context.rsi = data2 as usize;
                 context.rdx = data3 as usize;
@@ -288,11 +288,11 @@ impl Drop for Thread {
 // Allow thread details to outputted to screen
 impl fmt::Display for Thread {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let context = unsafe {&mut *(self.context as *mut Context)};
+        let context = unsafe {&mut *(self.context as *mut ISF)};
         let kernel_stack_start = self.kernel_stack_end - (KERNEL_STACK_SIZE as u64);
         let user_stack_start = self.user_stack_end - (USER_STACK_SIZE as u64);
-        let contextRip = context.rip;
-        let contextRsp = context.rsp;
+        let contextRip = context.instruction_pointer;
+        let contextRsp = context.stack_pointer;
         serial_println!("\n
 ===========================================
 Thread ID: {} , {:?}
@@ -300,7 +300,7 @@ Thread ID: {} , {:?}
 Kernel Stack:
     Start: {:#016X}
     End:   {:#016X}
-    Context Address: {:#016X}
+    ISF Address: {:#016X}
 -------------------------------------------
 User Stack:
     Start: {:#016X}
@@ -327,7 +327,7 @@ Thread ID: {} , {:?}
 Kernel Stack:
     Start: {:#016X}
     End:   {:#016X}
-    Context Address: {:#016X}
+    ISF Address: {:#016X}
 -------------------------------------------
 User Stack:
     Start: {:#016X}
@@ -382,23 +382,23 @@ pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socke
         })
     };
 
-    // Get a mutable ref to thread;s Context
+    // Get a mutable ref to thread;s ISF
     let context = new_thread.context_mut();
 
     // Set the instruction pointer to the function to be executed by the thread
     // provides the thread with a function to run
-    context.rip = function as usize;
+    context.instruction_pointer = function as usize;
 
     // Set processor flags; 0x200 enables interrupts
-    context.rflags = 0x200;
+    context.flags = 0x200;
 
     // Set segment selectors for code and data
     let (code_selector, data_selector) = gdt::get_kernel_segments();
-    context.cs = code_selector.0 as usize;
-    context.ss = data_selector.0 as usize;
+    context.code_segment = code_selector.0 as usize;
+    context.stack_segment = data_selector.0 as usize;
 
     // Set the stack pointer to the end of the user stack
-    context.rsp = new_thread.user_stack_end as usize;
+    context.stack_pointer = new_thread.user_stack_end as usize;
 
     // Get the thread ID for return
     let thread_id = new_thread.thread_id;
@@ -419,8 +419,7 @@ pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socke
 // Function to handle the scheduling of threads, ensuring each gets a fair share of CPU time.
 pub fn schedule_thread(thread: Box<Thread>) {
     // Turn off interrupts while modifying process table
-    interrupts::without_interrupts(|| {
-        RUNNING.write().push_front(thread);
+    interrupts::without_interrupts(|| {RUNNING.write().push_front(thread);
     });
 }
 
@@ -510,58 +509,60 @@ fn allocate_user_heap(user_pt_phys: u64) -> Result<(), &'static str> {
 }
 
 
-/// Loads an ELF binary into memory.
+
+/// Load an ELF binary into memory.
 ///
 /// # Arguments
 ///
-/// * `bin` - The ELF binary data.
-/// * `user_pt_phys` - The physical address of the user's page table.
+/// * `elf_file`: The ELF file to be loaded.
+/// * `user_page_table_phys`: The physical address of the user's page table.
+/// * `user_page_table_ptr`: The pointer to the user's page table.
 ///
 /// # Returns
 ///
-/// * `Result<(), &'static str>` - Returns Ok if the binary is successfully loaded, otherwise returns an Err.
-fn load_binary_into_memory(obj:&object::File, user_pt_phys: u64, user_pt_ptr: *mut PageTable) -> Result<(), &'static str> {
-    let entry_point = obj.entry();
+/// * `Result<(), &'static str>`: Returns `Ok(())` if successful, otherwise returns an error message.
+fn load_binary_into_memory(elf_file: &object::File, user_page_table_phys: u64, user_page_table_ptr: *mut PageTable) -> Result<(), &'static str> {
+    // Get the entry point of the ELF binary.
+    let entry_point = elf_file.entry();
+
     // Iterate over each segment in the ELF binary.
-    for segment in obj.segments() {
-        let segment_address = segment.address() as u64;
+    for segment in elf_file.segments() {
+        let segment_start_addr = segment.address() as u64;
+        let start_virt_addr = VirtAddr::new(segment_start_addr);
+        let end_virt_addr = start_virt_addr + segment.size() as u64;
 
-        let start_address = VirtAddr::new(segment_address);
-        let end_address = start_address + segment.size() as u64;
+        // Validate that the segment's memory range is within the allowed user code range.
+        if start_virt_addr < VirtAddr::new(USER_CODE_START) || end_virt_addr >= VirtAddr::new(USER_CODE_END) {
+            return Err("ELF segment outside allowed range");
+        }
 
-        // Verify that the segment's memory range is within the allowed user code range.
-        // For example, if USER_CODE_START is 0x400000, and USER_CODE_END is 0x800000,
-        // then any segment outside this range would be rejected.
-        if (start_address < VirtAddr::new(USER_CODE_START))
-            || (end_address >= VirtAddr::new(USER_CODE_END)) {
-                return Err("ELF segment outside allowed range");
-            }
-
-        // Reserve memory for the segment in the pagetable.
-        if memory::allocate_pages(user_pt_ptr,
-                                  start_address,
-                                  segment.size() as u64, // Size in bytes
-                                  PageTableFlags::PRESENT |
-                                  PageTableFlags::WRITABLE |
-                                  PageTableFlags::USER_ACCESSIBLE).is_err() {
+        // Reserve memory for the segment in the user's page table.
+        if memory::allocate_pages(
+            user_page_table_ptr,
+            start_virt_addr,
+            segment.size() as u64, // Size in bytes
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE
+        )
+        .is_err()
+        {
             return Err("Could not allocate memory");
         }
 
+        // Switch to the user's page table (i.e., switch to user mode).
+        memory::switch_to_pagetable(user_page_table_phys);
 
-        // Activate the user pagetable for the current CPU. (switch to user mode) 
-        memory::switch_to_pagetable(user_pt_phys);
-
-        // Retrieve and validate segment data.
-        if let Ok(data) = segment.data() {
-            if data.len() > segment.size() as usize {
+        // Retrieve the segment data.
+        if let Ok(segment_data) = segment.data() {
+            // Validate the segment data size.
+            if segment_data.len() > segment.size() as usize {
                 return Err("ELF data length > segment size");
-            } else if data.len() > 0 {
-                // Copy the segment data to its respective address in memory.
-                let dest_ptr = segment_address as *mut u8;
-                for (i, value) in data.iter().enumerate() {
+            } else if !segment_data.is_empty() {
+                // Copy the segment data into the allocated memory.
+                let dest_ptr = segment_start_addr as *mut u8;
+                for (index, value) in segment_data.iter().enumerate() {
                     unsafe {
-                        let ptr = dest_ptr.add(i);
-                        core::ptr::write(ptr, *value);
+                        let write_ptr = dest_ptr.add(index);
+                        core::ptr::write(write_ptr, *value);
                     }
                 }
             }
@@ -571,6 +572,7 @@ fn load_binary_into_memory(obj:&object::File, user_pt_phys: u64, user_pt_ptr: *m
     }
     Ok(())
 }
+
 
 /// Initializes a new thread.
 ///
@@ -620,17 +622,17 @@ fn initialise_thread(entry_point: u64, user_pt_phys: u64, user_pt_ptr: *mut Page
 
     // Update the execution context to point to the ELF binary's entry point.
     let context = new_thread.context_mut();
-    context.rip = entry_point as usize;
-    context.rflags = 0x0200; // Interrupt enable
+    context.instruction_pointer = entry_point as usize;
+    context.flags = 0x0200; // Interrupt enable
 
     // Set the code and data segment selectors for user mode execution.
     let (code_selector, data_selector) = gdt::get_user_segments();
-    context.cs = code_selector.0 as usize; // Code segment flags
-    context.ss = data_selector.0 as usize; // Without this we get a GPF
+    context.code_segment = code_selector.0 as usize; // Code segment flags
+    context.stack_segment = data_selector.0 as usize; // Without this we get a GPF
 
     
     // Set the stack pointer to the end of the allocated user stack. (start when growing up)
-    context.rsp = new_thread.user_stack_end as usize;
+    context.stack_pointer = new_thread.user_stack_end as usize;
 
     // Pass memory details to the thread through registers.
     context.rax = USER_HEAP_START as usize;
@@ -706,7 +708,7 @@ pub fn spawn_user_thread(bin_file: &[u8],params: Params) -> Result<u64, &'static
 }
 
 // Function to create a new thread by duplicating the current thread's state.
-pub fn fork_current_thread(current_context: &mut Context) {
+pub fn fork_current_thread(current_context: &mut ISF) {
 
     // Check if there's a currently running thread.
     if let Some(current_thread) = CURR_THREAD.read().as_ref() {
@@ -737,11 +739,11 @@ pub fn fork_current_thread(current_context: &mut Context) {
             };
 
             // Copy the context of the current thread to the new thread.
-            let new_context = unsafe {&mut *(new_thread.context as *mut Context)};
+            let new_context = unsafe {&mut *(new_thread.context as *mut ISF)};
             *new_context = current_context.clone();
 
             // Setup the new thread's stack pointer and reset the registers for the forked context.
-            new_context.rsp = new_thread.user_stack_end as usize;
+            new_context.stack_pointer = new_thread.user_stack_end as usize;
             new_context.rax = 0; 
             new_context.rdi = 0; 
             // Update the current thread's registers to indicate successful fork.
@@ -767,7 +769,7 @@ pub fn fork_current_thread(current_context: &mut Context) {
 }
 
 // Function to terminate the execution of the current thread and remove it from the scheduling queue.
-pub fn exit_current_thread(_current_context: &mut Context) {
+pub fn exit_current_thread(_current_context: &mut ISF) {
     // Remove the current thread from the global state.
     {
         let mut current_thread = CURR_THREAD.write();
@@ -861,7 +863,7 @@ pub fn schedule_next(context_addr: usize) -> usize {
 /// # Returns
 ///
 /// * `Result<usize, usize>` - Returns a handle to the opened resource if successful, otherwise returns an error code.
-pub fn open_path(current_context: &mut Context, path: &str) -> Result<usize, usize> {
+pub fn open_path(current_context: &mut ISF, path: &str) -> Result<usize, usize> {
     // Check if there is a currently running thread
     if let Some(current_thread) = CURR_THREAD.read().as_ref() {
         println!("[!] - Thread {} opening {}", current_thread.thread_id, path);
@@ -904,8 +906,8 @@ fn get_current_stack_pointer() -> usize {
 }
 
 // Function to get the current user stack pointer from a saved context.
-fn get_current_user_stack_pointer_from_context(context: &Context) -> usize {
-    context.rsp
+fn get_current_user_stack_pointer_from_context(context: &ISF) -> usize {
+    context.stack_pointer
 }
 
 // Inline function to get the current stack pointer for user mode.

@@ -4,7 +4,7 @@ use crate::{println,print};
 use crate::proc::process;
 use crate::boot::gdt;
 use crate::boot::interrupts;
-use crate::boot::interrupts::Context;
+use crate::boot::interrupts::ISF;
 use crate::sync::{Socket,Message, Data};
 
 
@@ -174,30 +174,30 @@ extern "C" fn handle_syscall() {
 
 /// Dispatcher function that handles syscalls based on their ID.
 /// It redirects to the appropriate syscall handler function after setting up the execution environment.
-extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64, arg1: u64, arg2: u64, arg3: u64) {
-    // Dereference the context pointer to get a mutable reference to the Context struct.
+extern "C" fn dispatch_syscall(context_ptr: *mut ISF, syscall_id: u64, arg1: u64, arg2: u64, arg3: u64) {
+    // Dereference the context pointer to get a mutable reference to the ISF struct.
     let context = unsafe { &mut *context_ptr };
 
     // Determine the appropriate code and data segment selectors based on the instruction pointer (RIP).
     // If the RIP is below the USER_CODE_START, we are in kernel mode; otherwise, we are in user mode.
     let (code_selector, data_selector) = 
-        if context.rip < process::USER_CODE_START as usize {
+        if context.instruction_pointer < process::USER_CODE_START as usize {
             gdt::get_kernel_segments() // Switching threads may overwrite permission registers, so get kernel segments.
         } else {
             gdt::get_user_segments() // We are in user mode, so get user segments.
         };
 
     // Update the code segment (CS) and stack segment (SS) in the context.
-    context.cs = code_selector.0 as usize;
-    context.ss = data_selector.0 as usize;
+    context.code_segment = code_selector.0 as usize;
+    context.stack_segment = data_selector.0 as usize;
 
     // Dispatch to the appropriate syscall handler based on the syscall ID.
     // The syscall ID is masked with 0xFF to get the actual ID value.
     match syscall_id & 0xFF {
         0 => process::fork_current_thread(context),  // Fork the current thread
         1 => process::exit_current_thread(context),  // Exit the current thread
-        2 => sys_write(arg1 as *const u8, arg2 as usize),  // Write to a file descriptor
-        3 => sys_receive(context_ptr, arg1),  // Receive a message
+        2 => sys_write(arg1 as *const u8, arg2 as usize),  // Write to a socket
+        3 => sys_receive(context_ptr, arg1),  // Receive a message from a socket 
         4 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message
         5 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message (duplicate case, consider removing)
         6 => sys_open(context_ptr, arg1 as *const u8, arg2 as usize),  // Open a file
@@ -220,8 +220,8 @@ extern "C" fn dispatch_syscall(context_ptr: *mut Context, syscall_id: u64, arg1:
 pub fn send(socket: u32, value: Message) -> Result<(), u64> {
     // Match the type of message to send
     match value {
-        // If the message is of type `Message::Short`
-        Message::Short(data1, data2, data3) => {
+        // If the message is of type `Message::Packet`
+        Message::Packet(data1, data2, data3) => {
             // Variable to hold the error code returned by the syscall
             let err: u64;
             
@@ -274,7 +274,7 @@ extern "C" fn sys_write(ptr: *const u8, size:usize) {
 ///
 /// * `context_ptr`: Pointer to the context of the current thread.
 /// * `handle`: The handle of the socket to receive from. Or index of the socket in the list
-fn sys_receive(context_ptr: *mut Context, handle: u64) {
+fn sys_receive(context_ptr: *mut ISF, handle: u64) {
     // Attempt to take the current thread from the scheduler
     if let Some(mut thread) = process::take_current_thread() {
         // Store the thread ID of the current thread
@@ -284,10 +284,10 @@ fn sys_receive(context_ptr: *mut Context, handle: u64) {
         thread.set_context(context_ptr); // This ensures that all subsequent operations within the system call are working with the most up-to-date context.
 
         // Attempt to get the socket from the thread's socket list
-        if let Some(rdv) = thread.get_sockets(handle) {
+        if let Some(sockets) = thread.get_sockets(handle) {
             // Perform the receive operation on the socket
             // This returns two threads: one to be started immediately, and one to be scheduled
-            let (thread1, thread2) = rdv.write().receive(thread);
+            let (thread1, thread2) = sockets.write().receive(thread);
 
             // Flag to indicate whether the current thread should return immediately
             let mut returning = false;
@@ -331,7 +331,7 @@ fn sys_receive(context_ptr: *mut Context, handle: u64) {
 /// - Retrieves the socket (rendezvous point) associated with the given handle.
 /// - Sends the message through the socket.
 /// - Manages the scheduling of threads based on the IPC operation.
-fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, data3: u64) {
+fn sys_send(context_ptr: *mut ISF, syscall_id: u64, data1: u64, data2: u64, data3: u64) {
     // Extract the handle from the upper 32 bits of the syscall_id
     let handle = syscall_id >> 32;
 
@@ -345,15 +345,15 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
         thread.set_context(context_ptr);
 
         // Attempt to retrieve the socket (rendezvous point) associated with the handle
-        if let Some(rdv) = thread.get_sockets(handle) {
-            // Create a 'Short' message using the syscall arguments
-            let message = Message::Short(data1, data2, data3);
+        if let Some(socket) = thread.get_sockets(handle) {
+            // Create a 'Packet' message using the syscall arguments
+            let message = Message::Packet(data1, data2, data3);
 
             // Perform the send operation and get the threads that are involved in the rendezvous
             // This could either be a simple send or a send-and-receive operation
             let (thread1, thread2) = match syscall_id & 0xFF {
-                4 => rdv.write().send_message(Some(thread), message),
-                5 => rdv.write().send_receive(thread, message),
+                4 => socket.write().send_message(Some(thread), message),
+                5 => socket.write().send_receive(thread, message),
                 _ => panic!("Internal error: Unknown IPC operation")
             };
 
@@ -393,7 +393,7 @@ fn sys_send(context_ptr: *mut Context, syscall_id: u64, data1: u64, data2: u64, 
 
 // The `sys_yield` function is responsible for yielding the CPU from the current thread,
 // allowing the scheduler to pick the next thread for execution.
-fn sys_yield(context_ptr: *mut Context) {
+fn sys_yield(context_ptr: *mut ISF) {
     // Schedule the next thread to run. The function `schedule_next` will return the stack pointer
     // of the next thread that should be executed.
     let next_stack = process::schedule_next(context_ptr as usize);
@@ -405,7 +405,7 @@ fn sys_yield(context_ptr: *mut Context) {
 
 // The `sys_open` function is responsible for opening a file or resource specified by a path.
 // It updates the thread's context to return a handle to the opened resource or an error code.
-fn sys_open(context_ptr: *mut Context, ptr: *const u8, len: usize) {
+fn sys_open(context_ptr: *mut ISF, ptr: *const u8, len: usize) {
     // Dereference the context pointer to get a mutable reference to the thread's context.
     let context = unsafe { &mut (*context_ptr) };
 

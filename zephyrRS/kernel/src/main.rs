@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 use kernel::mem::memory;
 use kernel::syscall::{self, SYSCALL_YEILD};
 use kernel::dev::vga_buffer;
-use kernel::boot::interrupts::{self, Context};
+use kernel::boot::interrupts::{self, ISF};
 use kernel::{println, serial_println, QemuExitCode};
 use kernel::proc::process;
 use kernel::sync::Socket;
@@ -48,9 +48,9 @@ fn kernel_thread_main() {
         }
     };
      
-    kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
-//
-//    for _ in 0..1000000000{
+    kernel::ID_SOCKET.write().send_message(None, Message::Packet(proc_id,0, 0));
+
+//   for _ in 0..1000000000{
 //        unsafe {asm!("nop");};
 //
 //    }
@@ -66,8 +66,8 @@ fn kernel_thread_main() {
 //        }
 //    };
 //     
-//    kernel::ID_SOCKET.write().send_message(None, Message::Short(proc_id,0, 0));
-//
+//    kernel::ID_SOCKET.write().send_message(None, Message::Packet(proc_id,0, 0));
+
     
     kernel::hlt_loop();
 }
@@ -82,7 +82,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // if the cfg attribute 'test' is set, call the function test_main
     kernel::init(); // call init fn from lib.rs for creating gdt, idt and mem
-    println!("Successfully initialised Kernel");
+    println!("[] - Successfully initialised Kernel");
     serial_println!("[] - Successfully initialised Kernel");   
     memory::init(boot_info);
 
@@ -96,8 +96,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     test_main();
     
     process::spawn_kernel_thread(kernel_thread_main, Vec::new());
-
-
 
 
     kernel::hlt_loop();

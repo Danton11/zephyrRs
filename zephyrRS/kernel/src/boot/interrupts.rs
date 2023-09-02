@@ -12,6 +12,9 @@ use crate::mem::memory;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::registers::control::Cr2;
 use pic8259::ChainedPics;
+use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+use spin::Mutex;
+use x86_64::instructions::port::Port;
 // Use the lazy_static macro to initialize a static InterruptDescriptorTable.
 // This ensures that the IDT is only initialized once.
 lazy_static! {
@@ -56,13 +59,13 @@ pub fn init_idt() {
 }
 
 
-/// The `Context` struct represents the saved CPU state for a thread.
+/// The `ISF` struct represents the saved CPU state for a thread.
 /// It is used for context switching, exception handling, and interrupt handling.
 /// Each field corresponds to a CPU register in x86-64 architecture.
 /// For more details on CPU registers, refer to: https://wiki.osdev.org/CPU_Registers_x86-64
 #[derive(Clone, Debug)]
 #[repr(C)] // Ensure C-compatible layout
-pub struct Context {
+pub struct ISF {
     // General-purpose registers
     pub r15: usize,
     pub r14: usize,
@@ -83,19 +86,19 @@ pub struct Context {
     pub rax: usize,
 
     // Exception stack frame pushed by the CPU on interrupt
-    pub rip: usize,     // Instruction pointer: holds the address of the next instruction to be executed
-    pub cs: usize,      // Code segment: holds the segment selector for the code segment
-    pub rflags: usize,  // Processor flags: holds the state of the processor flags
-    pub rsp: usize,     // Stack pointer: holds the top address of the stack
-    pub ss: usize,      // Stack segment: holds the segment selector for the stack segment
+    pub instruction_pointer: usize,     // Instruction pointer: holds the address of the next instruction to be executed
+    pub code_segment: usize,      // Code segment: holds the segment selector for the code segment
+    pub flags: usize,  // Processor flags: holds the state of the processor flags
+    pub stack_pointer: usize,     // Stack pointer: holds the top address of the stack
+    pub stack_segment: usize,      // Stack segment: holds the segment selector for the stack segment
 
     // Additional fields may be pushed by the CPU to align the stack
 }
-// The Context struct is crucial for multitasking and handling interrupts or exceptions.
+// The ISF struct is crucial for multitasking and handling interrupts or exceptions.
 // When a context switch occurs, the operating system saves the current state of the CPU 
-// registers into a Context struct for the thread that is being preempted. 
+// registers into a ISF struct for the thread that is being preempted. 
 // Later, when the thread is scheduled to run again, the OS restores the CPU state from 
-// this Context struct. This allows the thread to continue execution as if it was never interrupted.
+// this ISF struct. This allows the thread to continue execution as if it was never interrupted.
 
 
 
@@ -103,7 +106,7 @@ pub struct Context {
 
 
 
-/// Number of bytes needed to store a Context struct
+/// Number of bytes needed to store a ISF struct
 pub const INTERRUPT_CONTEXT_SIZE: usize = 20 * 8;
 
 /// The `timer_handler` function is the interrupt service routine (ISR) for timer interrupts.
@@ -142,7 +145,7 @@ extern "C" fn timer_handler(context_addr: usize) -> usize {
 /// It uses inline assembly to manually set the CPU registers and stack pointer.
 /// This function is a critical part of the context-switching mechanism.
 ///
-///  Sets the stack pointer (RSP) to the address of the new Context struct. This allows the subsequent pop instructions to restore the saved register values.
+///  Sets the stack pointer (RSP) to the address of the new ISF struct. This allows the subsequent pop instructions to restore the saved register values.
 ///  Restores the general-purpose registers (R15, R14, ..., RAX) from the stack.
 ///  Enables interrupts by setting the interrupt flag (IF) using the sti instruction. This allows the CPU to respond to further interrupts.
 ///  Executes iretq, which returns from the interrupt and transfers control to the new thread by setting the instruction pointer (RIP) to the saved value.
@@ -155,7 +158,7 @@ extern "C" fn timer_handler(context_addr: usize) -> usize {
 pub fn launch_thread(context_addr: usize) -> ! {
     // Inline assembly to perform the context switch.
     unsafe {
-        asm!("mov rsp, rdi", // Set the stack pointer (RSP) to the address of the new Context
+        asm!("mov rsp, rdi", // Set the stack pointer (RSP) to the address of the new ISF
 
              "pop r15", // Restore general-purpose registers
              "pop r14",
@@ -414,9 +417,7 @@ interrupt_wrap!(keyboard_handler_inner => keyboard_interrupt_handler);
 extern "C" fn keyboard_handler_inner(context_addr: usize)
                                      -> usize
 {
-    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-    use spin::Mutex;
-    use x86_64::instructions::port::Port;
+
 
     lazy_static! {
         static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
@@ -437,7 +438,7 @@ extern "C" fn keyboard_handler_inner(context_addr: usize)
                 DecodedKey::Unicode(character) => {
                     print!("{}", character);
                     let (thread1, thread2) =
-                        KEYBOARD_SOCKET.write().send_message(None,Message::Short(MESSAGE_TYPE_KEY, character as u64, 0)); // send message to redezvous, bin/main will pick it up
+                        KEYBOARD_SOCKET.write().send_message(None,Message::Packet(MESSAGE_TYPE_KEY, character as u64, 0)); // send message to redezvous, bin/main will pick it up
                     // thread1 should be scheduled to run next
                     if let Some(t) = thread2 {
                         process::schedule_thread(t);
