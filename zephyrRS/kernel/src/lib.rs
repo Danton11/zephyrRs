@@ -11,43 +11,38 @@
 #![allow(unused_imports)]
 extern crate alloc;
 
+use alloc::sync::Arc;
+use bootloader::BootInfo;
 use core::panic::PanicInfo;
 use lazy_static::lazy_static;
 use spin::RwLock;
-use alloc::sync::Arc;
-//use bootloader::BootInfo;
 
 pub mod boot;
 pub mod dev;
 pub mod mem;
 pub mod proc;
-pub mod syscall;
 pub mod sync;
+pub mod syscall;
 use sync::{Message, Socket};
 
-use mem::memory::memory_logger::MemoryLogger;
 use dev::vga_buffer;
+use mem::memory::memory_logger::MemoryLogger;
 
 lazy_static! {
-    pub static ref ID_SOCKET: Arc<RwLock<Socket>> =
-        Arc::new(RwLock::new(Socket::Empty));
-}
-
-
-lazy_static! {
-    pub static ref PROC_FIN_SOCKET: Arc<RwLock<Socket>> =
-        Arc::new(RwLock::new(Socket::Empty));
+    pub static ref ID_SOCKET: Arc<RwLock<Socket>> = Arc::new(RwLock::new(Socket::Empty));
 }
 
 lazy_static! {
-    pub static ref FIN_SOCKET: Arc<RwLock<Socket>> =
-        Arc::new(RwLock::new(Socket::Empty));
+    pub static ref PROC_FIN_SOCKET: Arc<RwLock<Socket>> = Arc::new(RwLock::new(Socket::Empty));
+}
+
+lazy_static! {
+    pub static ref FIN_SOCKET: Arc<RwLock<Socket>> = Arc::new(RwLock::new(Socket::Empty));
 }
 
 lazy_static! {
     pub static ref MEMORYLOGGER: spin::Mutex<MemoryLogger> = spin::Mutex::new(MemoryLogger::new());
 }
-
 
 //init interrupt handler
 pub fn init() {
@@ -61,7 +56,10 @@ pub trait Testable {
     fn run(&self) -> ();
 }
 
-impl<T> Testable for T where T: Fn(), {
+impl<T> Testable for T
+where
+    T: Fn(),
+{
     fn run(&self) {
         serial_print!("{}...\t", core::any::type_name::<T>()); // type_name gets the name of the function/test being run
         self(); //invoke the test
@@ -115,7 +113,7 @@ entry_point!(test_kernel_main);
 
 #[cfg(test)]
 fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
-    init(_boot_info);
+    init();
     test_main();
     hlt_loop();
 }

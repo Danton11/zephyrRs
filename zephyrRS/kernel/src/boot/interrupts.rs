@@ -121,12 +121,12 @@ pub const INTERRUPT_CONTEXT_SIZE: usize = 20 * 8;
 /// - Returns the stack pointer of the next thread to be scheduled.
 extern "C" fn timer_handler(context_addr: usize) -> usize {
     // The process scheduler decides which thread should be scheduled next.
-    // `schedule_next` returns the stack pointer of the next thread to switch to.
-    let next_stack = process::schedule_next(context_addr);
+    // `schedule` returns the stack pointer of the next thread to switch to.
+    let next_stack = process::schedule(context_addr);
 
     // Monitor the current thread if it exists.
     // This could involve updating statistics, checking for timeouts, etc.
-    if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+    if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
         process::monitor(thread);
     }
 
@@ -327,7 +327,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
 
     // Read the accessed virtual address from the CR2 register
     let accessed_virtaddr = Cr2::read();
-    //if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+    //if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
     //    process::monitor(thread);
     //}
     //Check the type of the fault
@@ -354,7 +354,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         serial_println!("Accessed Address: {:?}", accessed_virtaddr);
         serial_println!("Error Code: {:?}", error_code);
         serial_println!("{:#?}", stack_frame);
-        if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+        if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
            serial_println!("Exiting thread {}", thread.get_thread_id());
            //process::exit_current_thread(thread.context_mut());
         }
@@ -368,7 +368,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
 /// such as executing a privileged instruction while in user mode.
 /// This function prints the state of the CPU and then panics.
 extern "x86-interrupt" fn general_protection_fault_handler(stack_frame: InterruptStackFrame,_error_code: u64) {
-    if let Some(thread) = process::CURR_THREAD.read().as_ref() {
+    if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
         process::monitor(thread);
     }
     panic!("EXCEPTION: GENERAL PROTECTION FAULT\n{:#?}", stack_frame);
@@ -455,7 +455,7 @@ extern "C" fn keyboard_handler_inner(context_addr: usize)
 
     let next_context = if returning {context_addr} else {
         // Schedule a different thread to run
-        process::schedule_next(context_addr)
+        process::schedule(context_addr)
     };
 
     unsafe {

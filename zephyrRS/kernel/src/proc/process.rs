@@ -27,12 +27,14 @@ const USER_HEAP_SIZE: u64 = 4194304;            // Size of the user heap in byte
 
 // Global state for thread management
 lazy_static! {
-    // Queue containing runnable threads
-    static ref RUNNING: RwLock<VecDeque<Box<Thread>>> =
+    // Queue containing runnable threads that wait to become the running thread
+    // in a RwLock to make thread safe (spin lock)
+    static ref WAIT_QUEUE: RwLock<VecDeque<Box<Thread>>> =
         RwLock::new(VecDeque::new());
     
     // Current executing thread
-    pub static ref CURR_THREAD: RwLock<Option<Box<Thread>>> = RwLock::new(None);
+    // in a RwLock spin lock to make thread safe
+    pub static ref RUNNING_THREAD: RwLock<Option<Box<Thread>>> = RwLock::new(None);
     
     // Counter for generating unique IDs
     static ref COUNTER: RwLock<u64> = RwLock::new(0);
@@ -80,10 +82,12 @@ pub struct Thread {
 
     /// The memory region reserved for the thread's kernel stack. The kernel stack is used 
     /// for operations that occur in kernel mode, separate from the user stack.
+    /// Used to store the Context of a thread on switch
     kernel_stack: Vec<u8>,
 
     /// The end address of the kernel stack. Given that stacks grow downwards in memory, 
     /// this represents the top of the stack, and it's where new items would be pushed.
+    /// Actual address that is placed in the TSS
     kernel_stack_end: u64,
 
     /// The memory address where the thread's context is stored. The context includes
@@ -235,12 +239,12 @@ impl Thread {
 
 // Functions to manage the currently running thread.
 pub fn take_current_thread() -> Option<Box<Thread>> {
-    CURR_THREAD.write().take()
+    RUNNING_THREAD.write().take()
 }
 
 pub fn set_current_thread(thread: Box<Thread>) {
     // Replace the current thread
-    let old_current = CURR_THREAD.write().replace(thread);
+    let old_current = RUNNING_THREAD.write().replace(thread);
     if let Some(t) = old_current {
         schedule_thread(t); // make sure current thread gets reshceduled
     }
@@ -419,8 +423,8 @@ pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socke
 // Function to handle the scheduling of threads, ensuring each gets a fair share of CPU time.
 pub fn schedule_thread(thread: Box<Thread>) {
     // Turn off interrupts while modifying process table
-    interrupts::without_interrupts(|| {RUNNING.write().push_front(thread);
-    });
+    // so that we don't get any iterrupt during this
+    interrupts::without_interrupts(|| {WAIT_QUEUE.write().push_front(thread);});
 }
 
 
@@ -711,7 +715,7 @@ pub fn spawn_user_thread(bin_file: &[u8],params: Params) -> Result<u64, &'static
 pub fn fork_current_thread(current_context: &mut ISF) {
 
     // Check if there's a currently running thread.
-    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
+    if let Some(current_thread) = RUNNING_THREAD.read().as_ref() {
 
         // Fetch the active page table pointer.
         let page_table_ptr = memory::active_pagetable_ptr();
@@ -756,7 +760,7 @@ pub fn fork_current_thread(current_context: &mut ISF) {
             
             monitor(&new_thread);
             // Add the new thread to the running queue.
-            RUNNING.write().push_back(new_thread);
+            WAIT_QUEUE.write().push_back(new_thread);
         } else {
             // Handle memory allocation error for the user stack.
             println!("err");
@@ -772,11 +776,11 @@ pub fn fork_current_thread(current_context: &mut ISF) {
 pub fn exit_current_thread(_current_context: &mut ISF) {
     // Remove the current thread from the global state.
     {
-        let mut current_thread = CURR_THREAD.write();
+        let mut current_thread = RUNNING_THREAD.write();
 
         if let Some(_thread) = current_thread.take() {
 
-            RUNNING.write().retain(|t| t.thread_id != _thread.thread_id);
+            WAIT_QUEUE.write().retain(|t| t.thread_id != _thread.thread_id);
 
             //monitor(&_thread);
         }
@@ -791,8 +795,8 @@ pub fn exit_current_thread(_current_context: &mut ISF) {
 }
 
 
-/// Helper function to update the current thread's context and move it to the running queue.
-fn update_current_thread(context_addr: usize, running_queue: &mut VecDeque<Box<Thread>>, current_thread: &mut Option<Box<Thread>>) {
+/// Helper function to update the current thread's context and move it to the back of the wait queue.
+fn update_current_thread(context_addr: usize, waiting_queue: &mut VecDeque<Box<Thread>>, current_thread: &mut Option<Box<Thread>>) {
     if let Some(thread) = current_thread.take() {
         monitor(&thread);
         if thread.thread_type != ThreadType::Kernel {
@@ -801,7 +805,8 @@ fn update_current_thread(context_addr: usize, running_queue: &mut VecDeque<Box<T
         let mut updated_thread = thread;
         updated_thread.context = context_addr as u64;
         updated_thread.page_table_phys = memory::active_pagetable_physaddr();
-        running_queue.push_back(updated_thread);
+        waiting_queue.push_back(updated_thread); // push the thread that is being switched out to
+        // the back of the queue
     }
 }
 
@@ -818,22 +823,23 @@ fn update_current_thread(context_addr: usize, running_queue: &mut VecDeque<Box<T
 /// # Returns
 ///
 /// * `usize` - The address of the saved context of the next thread to run.
-pub fn schedule_next(context_addr: usize) -> usize {
+pub fn schedule(context_addr: usize) -> usize {
     // Lock the running queue and the current thread for writing.
-    let mut running_queue = RUNNING.write();
-    let mut current_thread = CURR_THREAD.write();
+    let mut waiting_queue = WAIT_QUEUE.write();
+    let mut running_thread = RUNNING_THREAD.write();
 
-    // Update the current thread and move it to the running queue.
-    update_current_thread(context_addr, &mut running_queue, &mut current_thread);
+    // Update the current thread and move it to the back of waiting queue.
+    update_current_thread(context_addr, &mut waiting_queue, &mut running_thread);
 
     // Pop the next thread from the front of the running queue.
-    *current_thread = running_queue.pop_front();
+    *running_thread = waiting_queue.pop_front();
 
     // Prepare the next thread for execution.
-    match current_thread.as_ref() {
+    match running_thread.as_ref() {
         Some(thread) => {
-            // Set the interrupt stack for the next scheduled thread.
-            gdt::set_interrupt_stack_table(gdt::TIMER_INTERRUPT_INDEX as usize,VirtAddr::new(thread.kernel_stack_end));
+            // Set the interrupt stack (kernel stack) for the next scheduled thread.
+            gdt::set_interrupt_stack_table(gdt::TIMER_INTERRUPT_INDEX as usize,
+                VirtAddr::new(thread.kernel_stack_end)); // context of next thread
 
             // If this isn't a kernel thread, switch to its page table.
             if thread.page_table_phys != 0 {
@@ -843,7 +849,8 @@ pub fn schedule_next(context_addr: usize) -> usize {
             // Return the saved context address for the next thread.
             thread.context as usize
         },
-        None => 0  // If there's no thread to schedule, return 0.
+        None => 0  // If there's no thread to schedule, return 0. i.e, before the first thread is
+        // spawned but there is still a timer interrupt
     }
 }
 
@@ -865,7 +872,7 @@ pub fn schedule_next(context_addr: usize) -> usize {
 /// * `Result<usize, usize>` - Returns a handle to the opened resource if successful, otherwise returns an error code.
 pub fn open_path(current_context: &mut ISF, path: &str) -> Result<usize, usize> {
     // Check if there is a currently running thread
-    if let Some(current_thread) = CURR_THREAD.read().as_ref() {
+    if let Some(current_thread) = RUNNING_THREAD.read().as_ref() {
         println!("[!] - Thread {} opening {}", current_thread.thread_id, path);
 
         // Lock the process for writing

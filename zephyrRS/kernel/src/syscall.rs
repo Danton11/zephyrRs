@@ -309,7 +309,7 @@ fn sys_receive(context_ptr: *mut ISF, handle: u64) {
 
             // If the current thread is not returning, schedule the next thread and switch context
             if !returning {
-                let new_context_addr = process::schedule_next(context_ptr as usize);
+                let new_context_addr = process::schedule(context_ptr as usize);
                 interrupts::launch_thread(new_context_addr);
             }
         } else {
@@ -379,7 +379,7 @@ fn sys_send(context_ptr: *mut ISF, syscall_id: u64, data1: u64, data2: u64, data
 
             // If the original thread is not among those returning, switch to a different thread
             if !returning {
-                let new_context_addr = process::schedule_next(context_ptr as usize);
+                let new_context_addr = process::schedule(context_ptr as usize);
                 interrupts::launch_thread(new_context_addr);
             }
         } else {
@@ -394,9 +394,9 @@ fn sys_send(context_ptr: *mut ISF, syscall_id: u64, data1: u64, data2: u64, data
 // The `sys_yield` function is responsible for yielding the CPU from the current thread,
 // allowing the scheduler to pick the next thread for execution.
 fn sys_yield(context_ptr: *mut ISF) {
-    // Schedule the next thread to run. The function `schedule_next` will return the stack pointer
+    // Schedule the next thread to run. The function `schedule` will return the stack pointer
     // of the next thread that should be executed.
-    let next_stack = process::schedule_next(context_ptr as usize);
+    let next_stack = process::schedule(context_ptr as usize);
 
     // Switch to the next thread. The `launch_thread` function will perform the actual
     // context switch, setting the CPU registers to the values saved in the next thread's context.

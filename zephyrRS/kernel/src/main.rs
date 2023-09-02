@@ -88,6 +88,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Set up system calls
     syscall::init();
+//    syscall::init();
     println!("Successfully initialised syscall functionality");
     serial_println!("Successfully initialised syscall functionality");
 
