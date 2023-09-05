@@ -2,14 +2,14 @@
 #![feature(alloc_error_handler)]
 
 use core::arch::asm;
+use core::panic::PanicInfo;
 pub mod syscall;
 pub mod mem;
 pub mod print;
 
-use core::panic::PanicInfo;
 #[panic_handler]
 pub fn panic(info: &PanicInfo) -> ! {
-    println!("User panic: {}", info);
+    println!("User space panic: {}", info);
     syscall::thread_exit();
 }
 

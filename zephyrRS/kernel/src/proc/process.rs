@@ -56,9 +56,6 @@ pub struct Process {
     
     // File descriptors for the process
     sockets: Vec<Option<Arc<RwLock<Socket>>>>,
-    
-    // Mounted filesystems for the process
-    mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>>,
 }
 
 // Enum to distinguish between Kernel and User threads
@@ -375,7 +372,6 @@ pub fn spawn_kernel_thread(function: fn()->(), mut sockets: Vec<Arc<RwLock<Socke
             process: Arc::new(RwLock::new(Process { 
                 page_table_physaddr: 0, 
                 sockets: sockets.drain(..).map(|h| Some(h)).collect(), 
-                mounts: Arc::new(RwLock::new(Vec::new()))
             })),
             kernel_stack,
             kernel_stack_end,
@@ -465,9 +461,6 @@ pub struct Params {
     // A vector containing file descriptors represented as sockets. 
     // This allows for shared access to file descriptors among threads.
     pub sockets: Vec<Arc<RwLock<Socket>>>,
-    // A mapping of mount points (e.g., "/mnt/disk1") to their corresponding sockets.
-    // This provides a mechanism for threads to access shared mount points.
-    pub mounts: Arc<RwLock<Vec<(String, Arc<RwLock<Socket>>)>>> 
 }
 
 
@@ -612,7 +605,7 @@ fn initialise_thread(entry_point: u64, user_pt_phys: u64, user_pt_ptr: *mut Page
         // Construct the thread object.
         Box::new(Thread {
             thread_id:  uid,
-            process: Arc::new(RwLock::new(Process {page_table_physaddr: user_pt_phys, sockets: sockets.drain(..).map(|h| Some(h)).collect(), mounts: params.mounts})),
+            process: Arc::new(RwLock::new(Process {page_table_physaddr: user_pt_phys, sockets: sockets.drain(..).map(|h| Some(h)).collect()})),
             page_table_phys: user_pt_phys,
             kernel_stack,
             kernel_stack_end,
@@ -856,49 +849,6 @@ pub fn schedule(context_addr: usize) -> usize {
 
 
 
-
-/// Opens a file or resource specified by a path and returns a handle to it.
-///
-/// This function is called to open a file or resource specified by the given path.
-/// It checks if the path is mounted and if so, returns a handle to the resource.
-///
-/// # Arguments
-///
-/// * `current_context` - The current execution context.
-/// * `path` - The path of the file or resource to open.
-///
-/// # Returns
-///
-/// * `Result<usize, usize>` - Returns a handle to the opened resource if successful, otherwise returns an error code.
-pub fn open_path(current_context: &mut ISF, path: &str) -> Result<usize, usize> {
-    // Check if there is a currently running thread
-    if let Some(current_thread) = RUNNING_THREAD.read().as_ref() {
-        println!("[!] - Thread {} opening {}", current_thread.thread_id, path);
-
-        // Lock the process for writing
-        let mut process = current_thread.process.write();
-
-        // Check if the path is mounted
-        let option = if let Some((_mount, soc)) = process.mounts.read().iter().find(|&(mount, soc)| mount == path) {
-            // Clone the socket if the path is mounted
-            Some(soc.clone())
-        } else {
-            // Return None if the path is not mounted
-            None
-        };
-
-        // If the path is mounted, add a handle and return it
-        if let Some(sock) = option {
-            let handle = process.add_handle(sock.clone());
-            return Ok(handle);
-        } else {
-            // Return an error code if the path is not mounted
-            return Err(7);
-        }
-    }
-    // Return an error code if there is no currently running thread
-    Err(0)
-}
 
 
 // Inline function to get the current stack pointer for kernel mode.

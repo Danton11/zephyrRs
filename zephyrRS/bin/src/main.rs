@@ -47,6 +47,7 @@ fn recursive_function(depth: usize, thread_id: u64) {
         recursive_function(depth + 10 , thread_id);
     } 
 }
+
 pub extern "C" fn recursive_too_deep_thread() {
     let thread_id = recv_id();
     println!("[thread {}]: Starting recursive function", thread_id);

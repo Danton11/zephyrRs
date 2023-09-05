@@ -33,12 +33,9 @@ fn kernel_thread_main() {
     let keyboard_listener = interrupts::keyboard_socket();
     let vga_listener = vga_buffer::start_listener();
     let resources = [keyboard_listener.clone(),vga_listener.clone(), kernel::ID_SOCKET.clone(), kernel::FIN_SOCKET.clone(), kernel::PROC_FIN_SOCKET.clone()]; // list of listeners for a process to have
-    //
-    //
-
     
 
-    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { sockets: resources.to_vec(), mounts: Arc::new(RwLock::new(Vec::new()))});
+    let proc = process::spawn_user_thread(include_bytes!("../../user/bin"),process::Params { sockets: resources.to_vec()});
 
     let proc_id = match proc {
         Ok(val) => val,

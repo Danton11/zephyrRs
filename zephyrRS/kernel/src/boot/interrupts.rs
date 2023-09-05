@@ -15,6 +15,8 @@ use pic8259::ChainedPics;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
+//use api::syscall as apisys;
+
 // Use the lazy_static macro to initialize a static InterruptDescriptorTable.
 // This ensures that the IDT is only initialized once.
 lazy_static! {
@@ -324,13 +326,9 @@ extern "x86-interrupt" fn double_fault_handler(
 /// A page fault occurs when a program tries to access a page that is not currently in memory.
 /// This function checks the type of page fault and tries to handle it accordingly.
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,error_code: PageFaultErrorCode,) {
-
     // Read the accessed virtual address from the CR2 register
     let accessed_virtaddr = Cr2::read();
-    //if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
-    //    process::monitor(thread);
-    //}
-    //Check the type of the fault
+
     if error_code == (PageFaultErrorCode::PROTECTION_VIOLATION |
                       PageFaultErrorCode::CAUSED_BY_WRITE |
                       PageFaultErrorCode::USER_MODE) {
@@ -342,10 +340,15 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         if let Err(msg) = memory::allocate_missing_ondemand_frame(accessed_virtaddr) {
             println!("Page fault error: {}", msg);
             serial_println!("Page fault error: {}", msg);
-            hlt_loop();
+            //hlt_loop();
         }
 
     } else {
+        if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
+           serial_println!("Exiting thread {}", thread.get_thread_id());
+           process::exit_current_thread(thread.context_mut());
+        }
+
         println!("EXCEPTION: PAGE FAULT");
         println!("Accessed Address: {:?}", accessed_virtaddr);
         println!("Error Code: {:?}", error_code);
@@ -354,10 +357,6 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         serial_println!("Accessed Address: {:?}", accessed_virtaddr);
         serial_println!("Error Code: {:?}", error_code);
         serial_println!("{:#?}", stack_frame);
-        if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
-           serial_println!("Exiting thread {}", thread.get_thread_id());
-           //process::exit_current_thread(thread.context_mut());
-        }
         hlt_loop();
     }
 }

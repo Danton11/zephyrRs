@@ -88,11 +88,12 @@ pub fn thread_exit() -> ! {
     // Execute inline assembly to perform the syscall for thread exit.
     unsafe {
         asm!("mov rax, 1", // Set rax to 1 to indicate exit_current_thread syscall.
-             "syscall");   // Perform the syscall.
+             "syscall",
+             options(noreturn));   // Perform the syscall.
     }
 
     // Loop indefinitely as this thread should now be terminated.
-    loop {}
+    //loop {}
 }
 
 

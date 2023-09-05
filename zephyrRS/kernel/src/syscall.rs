@@ -59,7 +59,8 @@ pub fn init() {
         asm!("mov rdx, rax",
              "shr rdx, 32",
              "wrmsr",
-             in("rax") handler_addr,
+             in("rax") handler_addr, //  puts the location of the function that will handle a
+            //  syscall when a syscall is called
              in("rcx") MSR_LSTAR);
 
 
@@ -82,6 +83,8 @@ pub fn init() {
 
 /// Naked syscall handler function which sets up the required environment for processing syscalls.
 /// It saves the current context and prepares the stack to make a transition from user space to kernel space.
+/// after this function is defined as the handler for the "syscall" asm call. it will save
+/// relevant ISFs and call dispatch syscall 
 #[naked]
 extern "C" fn handle_syscall() {
     unsafe {
@@ -131,7 +134,7 @@ extern "C" fn handle_syscall() {
             "mov rdx, rdi",
             "mov rsi, rax",
             "mov rdi, rsp",
-            "call {dispatcher}",
+            "call {dispatcher}", 
 
             "pop r15", // restore callee-saved registers
             "pop r14",
@@ -200,7 +203,6 @@ extern "C" fn dispatch_syscall(context_ptr: *mut ISF, syscall_id: u64, arg1: u64
         3 => sys_receive(context_ptr, arg1),  // Receive a message from a socket 
         4 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message
         5 => sys_send(context_ptr, syscall_id, arg1, arg2, arg3),  // Send a message (duplicate case, consider removing)
-        6 => sys_open(context_ptr, arg1 as *const u8, arg2 as usize),  // Open a file
         9 => sys_yield(context_ptr),  // Yield the processor
         _ => println!("Unknown syscall {:?} {} {} {}", context_ptr, syscall_id, arg1, arg2)  // Unknown syscall
     }
@@ -403,37 +405,4 @@ fn sys_yield(context_ptr: *mut ISF) {
     interrupts::launch_thread(next_stack);
 }
 
-// The `sys_open` function is responsible for opening a file or resource specified by a path.
-// It updates the thread's context to return a handle to the opened resource or an error code.
-fn sys_open(context_ptr: *mut ISF, ptr: *const u8, len: usize) {
-    // Dereference the context pointer to get a mutable reference to the thread's context.
-    let context = unsafe { &mut (*context_ptr) };
 
-    // Check if the length of the input string is zero. If it is, return an error code 5.
-    if len == 0 {
-        context.rax = 5;
-        return;
-    }
-
-    // Convert the raw pointer to a slice of u8. This slice represents the path string.
-    let u8_slice = unsafe { slice::from_raw_parts(ptr, len) };
-
-    // Attempt to convert the u8 slice to a UTF-8 string.
-    if let Ok(path_string) = str::from_utf8(u8_slice) {
-        // Try to open the path. The `open_path` function will return either a handle to the opened
-        // resource or an error code.
-        match process::open_path(context, &path_string) {
-            Ok(handle) => {
-                context.rax = 0; // Indicate that no error occurred.
-                context.rdi = handle; // Return the handle to the opened resource.
-            }
-            Err(error_code) => {
-                // An error occurred while trying to open the path. Return the error code.
-                context.rax = error_code;
-            }
-        }
-    } else {
-        // The u8 slice could not be converted to a UTF-8 string. Return an error code 6.
-        context.rax = 6;
-    }
-}
