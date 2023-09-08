@@ -180,7 +180,7 @@ Input: h - (show these prompts again)\n
 Input: b - (calls 3 threads incrementing an individual counter)\n
 Input: r - (calls a function that recurs and allocated some space in  the stack)\n
 Input: m - (calls a function that attempts to write to a kernel stack (malicious!)\n 
-Input: a - (atomically incremenet a counter)\n 
+Input: number up to 4 - (atomically incremenet a counter in parallel (number times))\n 
 Input: e - (allocate some space on the heap and then free)\n 
         ");
 
@@ -220,7 +220,7 @@ Input: h - (show these prompts again)\n
 Input: b - (calls 3 threads incrementing an individual counter)\n
 Input: r - (calls a function that recurs and allocated some space in  the stack)\n
 Input: m - (calls a function that attempts to write to a kernel stack (malicious!)\n 
-Input: a - (atomically incremenet a counter)\n 
+Input: number up to 4 - (atomically incremenet a counter in parallel (number times))\n 
 Input: e - (allocate some space on the heap and then free)\n 
         ");
 
