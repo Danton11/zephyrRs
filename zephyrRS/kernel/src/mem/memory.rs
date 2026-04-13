@@ -52,7 +52,12 @@ use lazy_static::lazy_static;
 pub mod memory_logger;
 use memory_logger::{MemoryLogger, MemoryRegion};
 
-const USER_STACK_PAGE_INDEX: [u8;3] = [5,0,0];
+// p4 slot 6 places user stacks at virtual 0x30000000000, which sits safely
+// above the bootloader's map_physical_memory region. Slot 5 collides with a
+// spurious 2 MiB huge-page entry the bootloader leaves at L4[5][0][0] (the
+// virtual address phys_off + top-of-phys-memory), which copy_pagetables
+// then mirrors into every user PT — walking into it corrupts `table`.
+const USER_STACK_PAGE_INDEX: [u8;3] = [6,0,0];
 
 /**
 MemoryInfo stores information about the kernel's memory environment. 

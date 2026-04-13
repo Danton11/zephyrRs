@@ -1,4 +1,4 @@
-use core::arch::asm;
+use core::arch::{asm, naked_asm};
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
@@ -218,11 +218,12 @@ macro_rules! interrupt_wrap {
     ($func: ident => $wrapper:ident) => {
         /// A naked function that serves as the entry point for the interrupt.
         /// This function is responsible for saving and restoring the CPU state.
-        #[naked]
+        #[unsafe(naked)]
         pub extern "x86-interrupt" fn $wrapper (_stack_frame: InterruptStackFrame) {
-            // Naked functions must consist of a single asm! block
-            unsafe{
-                asm!(
+            // Naked functions must consist of a single naked_asm! block.
+            // Modern nightly replaced asm!+options(noreturn) inside naked fns
+            // with the dedicated naked_asm! macro.
+            naked_asm!(
                     // Disable interrupts
                     "cli",
                     // Push general-purpose registers onto the stack
@@ -279,10 +280,8 @@ macro_rules! interrupt_wrap {
                     "sti",
                     // Return from interrupt
                     "iretq",
-                    handler = sym $func,
-                    options(noreturn)
-                );
-            }
+                handler = sym $func,
+            );
         }
     };
 }
@@ -344,19 +343,21 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame,er
         }
 
     } else {
-        if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
-           serial_println!("Exiting thread {}", thread.get_thread_id());
-           process::exit_current_thread(thread.context_mut());
-        }
-
-        println!("EXCEPTION: PAGE FAULT");
-        println!("Accessed Address: {:?}", accessed_virtaddr);
-        println!("Error Code: {:?}", error_code);
-        println!("{:#?}", stack_frame);       
+        // Print the fault details BEFORE exiting the thread — exit_current_thread
+        // context-switches away, so anything after it is unreachable.
         serial_println!("EXCEPTION: PAGE FAULT");
         serial_println!("Accessed Address: {:?}", accessed_virtaddr);
         serial_println!("Error Code: {:?}", error_code);
         serial_println!("{:#?}", stack_frame);
+        println!("EXCEPTION: PAGE FAULT");
+        println!("Accessed Address: {:?}", accessed_virtaddr);
+        println!("Error Code: {:?}", error_code);
+        println!("{:#?}", stack_frame);
+
+        if let Some(thread) = process::RUNNING_THREAD.read().as_ref() {
+           serial_println!("Exiting thread {}", thread.get_thread_id());
+           process::exit_current_thread(thread.context_mut());
+        }
         hlt_loop();
     }
 }

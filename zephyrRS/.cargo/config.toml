@@ -1,6 +1,8 @@
 [unstable]
 build-std-features = ["compiler-builtins-mem"]
 build-std = ["core","compiler_builtins","alloc"]
+# Newer nightlies (post ~2024) gate JSON custom target specs behind this flag.
+json-target-spec = true
 
 [build]
 target = "x86_64-zephyr.json"

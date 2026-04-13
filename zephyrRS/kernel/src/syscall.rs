@@ -1,4 +1,4 @@
-use core::{arch::asm, slice, str};
+use core::{arch::{asm, naked_asm}, slice, str};
 use core::mem::drop;
 use crate::{println,print};
 use crate::proc::process;
@@ -85,10 +85,9 @@ pub fn init() {
 /// It saves the current context and prepares the stack to make a transition from user space to kernel space.
 /// after this function is defined as the handler for the "syscall" asm call. it will save
 /// relevant ISFs and call dispatch syscall 
-#[naked]
+#[unsafe(naked)]
 extern "C" fn handle_syscall() {
-    unsafe {
-        asm!(
+    naked_asm!(
             // switch to a syscall specific stack
             // - https://github.com/redox-os/kernel/blob/master/src/arch/x86_64/interrupt/syscall.rs#L65
             // - https://www.felixcloutier.com/x86/swapgs
@@ -166,13 +165,12 @@ extern "C" fn handle_syscall() {
             "push r11",
             "popf", // Set RFLAGS
             "jmp rcx", // Jump to kernel code
-            dispatcher = sym dispatch_syscall,
-            tss_timer = const(0x24 + gdt::TIMER_INTERRUPT_INDEX * 8),
-            tss_temp = const(0x24 + gdt::SYSCALL_TEMP_INDEX * 8),
-            ks_offset = const(SYSCALL_KERNEL_STACK_OFFSET),
-            user_code_start = const(process::USER_CODE_START),
-            options(noreturn));
-    }
+        dispatcher = sym dispatch_syscall,
+        tss_timer = const(0x24 + gdt::TIMER_INTERRUPT_INDEX * 8),
+        tss_temp = const(0x24 + gdt::SYSCALL_TEMP_INDEX * 8),
+        ks_offset = const(SYSCALL_KERNEL_STACK_OFFSET),
+        user_code_start = const(process::USER_CODE_START),
+    );
 }
 
 /// Dispatcher function that handles syscalls based on their ID.

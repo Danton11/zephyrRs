@@ -127,18 +127,19 @@ impl Writer {
                 // ASCII for Delete key
                 //let (y,x) = self.get_position();
 
-                // Shift all characters to the right of the cursor to the left
+                // Shift all characters to the right of the cursor to the left.
+                // `chars` is indexed [row][col], so row_position is the outer index.
                 for i in self.column_position..BUFFER_WIDTH - 1 {
                     let ScreenChar {
                         ascii_character: c, ..
-                    } = self.buffer.chars[i + 1][self.row_position].read();
-                    self.buffer.chars[i][self.row_position].write(ScreenChar {
+                    } = self.buffer.chars[self.row_position][i + 1].read();
+                    self.buffer.chars[self.row_position][i].write(ScreenChar {
                         ascii_character: c,
                         color_code: self.color_code,
                     });
                 }
                 // Clear the last character on the line
-                self.buffer.chars[BUFFER_WIDTH - 1][self.row_position].write(ScreenChar {
+                self.buffer.chars[self.row_position][BUFFER_WIDTH - 1].write(ScreenChar {
                     ascii_character: b' ',
                     color_code: self.color_code,
                 });
